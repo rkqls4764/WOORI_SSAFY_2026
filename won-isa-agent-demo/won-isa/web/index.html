@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WON이사 · 위비 Agent 데모</title>
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<div class="controls" id="controls">
+  <span class="mode" id="mode">모드 확인 중</span>
+  <button data-act="reset" title="R">처음부터</button>
+  <button data-act="2w" title="2">2주 뒤</button>
+  <button data-act="30d" title="3">30일째</button>
+  <span class="hint">단축키 R · 2 · 3</span>
+</div>
+
+<div class="stage" id="stage">
+  <!-- 폰 -->
+  <div class="phone">
+    <div class="screen" id="screen">
+
+      <!-- K1 홈: Figma 화면 이미지 + 누를 수 있는 영역 -->
+      <section class="view" id="view-home">
+        <img src="/assets/k1_home.png" alt="우리WON뱅킹 홈 · 위비 Agent 배너" class="bg">
+        <button class="hot" style="left:38px;top:330px;width:284px;height:46px" data-say="이사 견적 내줘" aria-label="위비에게 이사 견적 받기"></button>
+        <button class="hot" style="left:20px;top:440px;width:320px;height:38px" data-say="이사 견적 내줘" aria-label="이사 견적 내줘"></button>
+        <button class="hot" style="left:20px;top:486px;width:320px;height:38px" data-say="적금은 만기까지 둘래" aria-label="적금은 만기까지 둘래"></button>
+        <button class="hot" style="left:20px;top:532px;width:320px;height:38px" data-say="생활비만 옮기고 싶어" aria-label="생활비만 옮기고 싶어"></button>
+      </section>
+
+      <!-- 대화 화면: 헤더·입력창은 Figma 이미지, 대화와 카드는 HTML -->
+      <section class="view hidden" id="view-chat">
+        <img src="/assets/chat_header.png" alt="" class="chrome-top">
+        <button class="hot" style="left:6px;top:46px;width:40px;height:44px" data-go="home" aria-label="뒤로"></button>
+        <div class="subtitle"><i></i><span id="subtitle">이사 진행 중</span></div>
+        <div class="msgs" id="msgs"></div>
+        <img src="/assets/chat_footer.png" alt="" class="chrome-bottom">
+        <form class="composer" id="composer">
+          <input id="input" autocomplete="off" placeholder="위비에게 요청하기" aria-label="위비에게 요청하기">
+          <button type="submit" class="send" aria-label="보내기"></button>
+        </form>
+      </section>
+
+      <!-- K7 정착 현황 -->
+      <section class="view hidden" id="view-settle">
+        <img src="/assets/settle_header.png" alt="" class="chrome-top">
+        <button class="hot" style="left:6px;top:40px;width:40px;height:44px" data-go="chat" aria-label="뒤로"></button>
+        <div class="settle" id="settle"></div>
+        <img src="/assets/sysnav.png" alt="" class="sysnav">
+      </section>
+
+    </div>
+  </div>
+
+  <!-- 실행 로그 패널 -->
+  <aside class="panel" id="panel">
+    <header>
+      <img src="/assets/avatar_wibee.png" alt="">
+      <div>
+        <h1>위비 Agent · 실행 로그</h1>
+        <p id="scene">김우리 · 장면 K1 홈 · Agent 배너</p>
+      </div>
+      <span class="pill" id="llm-pill">temperature 0</span>
+    </header>
+    <ol class="log" id="log">
+      <li class="empty">고객 요청이 들어오면 Agent가 부른 도구와 시스템 검증이 여기에 순서대로 쌓입니다.</li>
+    </ol>
+    <section class="status">
+      <h2>Agent 상태</h2>
+      <dl>
+        <div><dt>목표</dt><dd id="st-goal">이사 완료 · 출금 실패 0건</dd></div>
+        <div><dt>계획 · 승인</dt><dd id="st-plan">계획 전</dd></div>
+        <div><dt>승인 없는 실행</dt><dd class="good" id="st-unauth">0건</dd></div>
+      </dl>
+      <p class="sub" id="st-sub">차단 0건 · 중복 실행 방지 0건 · 기준일 2026.11.16</p>
+    </section>
+    <footer>
+      <h3>숫자는 시스템 계산 · LLM은 도구 선택과 설명만</h3>
+      <div class="roles">
+        <div><b class="c-llm">LLM</b><span>도구 선택 · 설명 · 되묻기</span></div>
+        <div><b class="c-sys">시스템</b><span>계산 · 검증 · 실행 통제</span></div>
+        <div><b class="c-cus">고객</b><span>확인 · 승인 · 인증</span></div>
+      </div>
+    </footer>
+  </aside>
+</div>
+
+<div class="caption hidden" id="caption"></div>
+<div class="overlay hidden" id="overlay"></div>
+<div class="auth hidden" id="auth"><div><b>모의 인증</b><span>생체 인증 확인 중…</span></div></div>
+<script src="/app.js"></script>
+</body>
+</html>

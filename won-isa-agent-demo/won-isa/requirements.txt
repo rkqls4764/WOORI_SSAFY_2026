@@ -1,0 +1,8 @@
+fastapi>=0.110
+uvicorn>=0.29
+openai>=1.30
+holidays>=0.50
+python-dotenv>=1.0
+httpx>=0.27
+playwright>=1.44
+imageio-ffmpeg>=0.5
