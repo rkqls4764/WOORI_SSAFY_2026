@@ -12,12 +12,15 @@ import re
 import time
 from dataclasses import dataclass, field
 
-from . import guard, tools as T
-from .prompts import SYSTEM_PROMPT
+from . import coach, guard, tools as T
+from .prompts import PERSONA_PROMPT, PERSONAS, SETTLE_PROMPT, SYSTEM_PROMPT
 from .rules import fmt
 
 MAX_STEPS = 8
 # 계획이 바뀐 것처럼 말하는 표현(계획 변경이 막힌 턴에서만 검사)
+# 조회 근거 가드: 지금 상태를 묻는데 이번 턴에 조회 없이(이전 대화 기억으로) 답하면 시스템이 최신 값을 조회해 다시 답하게 한다
+FRESH_READS = (("get_reward_status", r"꿀머니|꿀\s*(얼마|몇)", r"얼마|몇|모였|잔액|있어|남았"),
+               ("get_move_status", None, r"처리|됐|되었|완료|상태|어떻게|진행"))
 CLAIM_RE = r"(옮길게요|옮겼어요|미뤘어요|미룰게요|미루고|반영했어요|반영할게요|이전할게요|포함할게요|변경했어요|조정했어요|조정할게요)"
 
 
@@ -91,6 +94,54 @@ class ScriptedLLM:
     def _say(text):
         return {"content": text, "tool_calls": [], "usage": {"prompt": 0, "completion": 0}}
 
+    def _settle(self, u, done, had, names):
+        """정착 단계 대본: 동의·캐릭터·목표·미션·꿀머니."""
+        if u.startswith("[시스템 이벤트]"):
+            if "소비 분석 동의" in u:
+                m = done.get("analyze_spending", {}).get("match")
+                return self._say(f"카드 결제를 보니 {m['type']} 소비가 두드러져요.\n\n화면에서 담당 캐릭터를 골라 주세요." if m
+                                 else "분석 결과를 확인해 주세요.")
+            if "담당 캐릭터" in u:
+                pi = coach.persona_info(self.s.persona)
+                return self._say(f"안녕하세요, 이제부터 {pi['name']}가 김우리 님을 맡을게요!\n\n식비 절약과 저축 중 어떤 목표로 시작할까요?")
+            if "목표 선택" in u:
+                return self._say("목표에 맞는 미션과 예금성 상품을 골랐어요.\n\n참여하고 싶은 미션을 눌러 주세요.")
+            if "미션 참여" in u:
+                return self._say("좋아요, 일주일 동안 같이 해 봐요!\n\n결과는 시스템이 거래내역으로 확인해요.")
+            if "미션 결과" in u:
+                return self._say("일주일 결과가 나왔어요.\n\n모은 꿀머니로 꾸미기를 해 볼까요?")
+            return None
+        if "카드" in u and "추천" in u:
+            return self._say("지금은 예금성 상품만 안내해 드려요.\n\n식비 절약이나 저축 목표에 맞는 적금은 바로 볼 수 있어요.")
+        if any(k in u for k in ("꿀머니", "꾸미", "스킨")) and "get_reward_status" in names:
+            if not had("get_reward_status"):
+                return self._call("get_reward_status")
+            return self._say("꿀머니와 꾸미기 현황이에요.")
+        goal = coach.goal_from_text(u)
+        if (goal or "추천" in u) and "recommend_for_goal" in names:
+            if not had("recommend_for_goal"):
+                return self._call("recommend_for_goal", **({"goal": goal} if goal else {}))
+            r = done["recommend_for_goal"]
+            if r.get("need_consent"):
+                return self._say("소비 분석은 동의가 필요해요.\n\n화면의 '동의하고 분석하기'를 눌러 주세요.")
+            if r.get("need_goal"):
+                return self._say("식비 절약과 저축 중 어떤 목표로 볼까요?")
+            return self._say(f"'{r['goal']}' 목표에 맞는 미션과 예금성 상품이에요.\n\n참여하고 싶은 미션을 눌러 주세요.")
+        if "분석" in u and "analyze_spending" in names:
+            if not had("analyze_spending"):
+                return self._call("analyze_spending")
+            r = done["analyze_spending"]
+            if r.get("need_consent"):
+                return self._say("소비 분석은 동의가 필요해요.\n\n화면의 '동의하고 분석하기'를 눌러 주세요.")
+            return self._say(f"{r['match']['type']} 소비가 두드러져요.")
+        if any(k in u for k in ("남은", "처리", "관리비", "현황")):
+            if not had("get_move_status"):
+                return self._call("get_move_status")
+            r = done["get_move_status"]
+            left = [x["label"] for x in r["items"] if x["state"] in ("실패", "확인 대기")]
+            return self._say(f"아직 남은 이사 항목: {', '.join(left)}.\n\n처리 결과가 오면 알려 드릴게요." if left else "남은 이사 항목은 없어요.")
+        return None
+
     def _id_by_label(self, text):
         for i in self.s.items.values():
             if i["label"].replace(" ", "") in text.replace(" ", ""):
@@ -105,6 +156,10 @@ class ScriptedLLM:
             if m["role"] == "tool":
                 done[m["name"]] = json.loads(m["content"])
         had = lambda n: n in done
+        if self.s.stage == "settle":
+            r = self._settle(u, done, had, {x["function"]["name"] for x in tools})
+            if r:
+                return r
 
         # --- 시스템 이벤트
         if u.startswith("[시스템 이벤트]"):
@@ -253,6 +308,13 @@ def _summary(name, args, r) -> list[dict]:
         labs = ", ".join(m["label"] for m in r["matches"])
         return [{"kind": "tool", "title": f"{name}({a})", "sub": "계획 변경 요청"},
                 {"kind": "block", "title": "모호성 가드", "sub": f"고객 발화 '{r['query']}' → {len(r['matches'])}건({labs}) · 계획 안 바꾸고 되묻기"}]
+    if r.get("need_consent"):
+        return [{"kind": "tool", "title": f"{name}()", "sub": "소비 분석 요청"},
+                {"kind": "block", "title": "동의 가드", "sub": "소비 분석·추천 동의 없음 → 분석하지 않고 동의 요청"}]
+    if r.get("need_goal"):
+        a = ", ".join(f"{k}={v}" for k, v in args.items() if v)
+        return [{"kind": "tool", "title": f"{name}({a})", "sub": "추천 요청"},
+                {"kind": "block", "title": "목표 근거 가드", "sub": "고객이 고른 목표 없음 → 추천하지 않고 목표를 물음"}]
     if "error" in r:
         return [{"kind": "error", "title": f"{name}()", "sub": r["error"]}]
     a = ", ".join(f"{k}={v}" for k, v in args.items() if v)
@@ -275,6 +337,10 @@ def _summary(name, args, r) -> list[dict]:
         out = [head | {"sub": f"계획 v{r['version']} · 단계 {len(r['steps'])}개 · 해시 {r['plan_hash'][:6]}" + ("" if r["changed"] else " (변경 없음)")}]
         if r["reapproval_required"]:
             out.append({"kind": "block", "title": f"v{r['invalidated_version']} {r['invalidated_what']} 무효", "sub": "계획 버전이 바뀜 → 이전 버전으로는 승인·실행 불가, 재승인 필요"})
+        if r.get("resolved_items") or r.get("unknown_items"):
+            parts = [f"이름 '{k}' → {v}" for k, v in (r.get("resolved_items") or {}).items()]
+            parts += [f"없는 항목 '{x}' 뺌" for x in r.get("unknown_items") or []]
+            out.append({"kind": "block", "title": "항목 대조", "sub": " · ".join(parts) + " (모델이 넘긴 항목을 실제 항목과 대조)"})
         if r.get("ignored_items"):
             labs = ", ".join(i["label"] for i in r["ignored_items"])
             out.append({"kind": "block", "title": "항목 근거 가드", "sub": f"고객이 말하지 않은 항목({labs})은 계획에서 뺌 · 말한 항목만 반영"})
@@ -294,10 +360,23 @@ def _summary(name, args, r) -> list[dict]:
         return [head | {"sub": f"{r['item']} → {'직접 변경 요청' if r['option'] == 'direct_request' else '잔액 유지 알림'}"}]
     if name == "get_settlement_status":
         return [head | {"sub": f"확인 완료 {r['done']}/{r['total']} · 거래 패턴만으로 완료 확정 안 함"}]
+    if name == "analyze_spending":
+        m = r["match"]
+        return [head | {"sub": f"카드 {r['period']['days']}일 · 월평균 {r['card_monthly_avg']:,}원 · 규칙으로 유형 결정"},
+                {"kind": "observe", "title": f"{m['type']} → {m['character']} 제안", "sub": m["why"]}]
+    if name == "recommend_for_goal":
+        return [head | {"sub": f"목표 '{r['goal']}' · 예금성 상품 {len(r['products'])}개 · 미션 {len(r['missions'])}개 · 기대 효과는 시스템 계산"}]
+    if name == "get_reward_status":
+        L = r["ledger"]
+        return [head | {"sub": f"꿀머니 {L['balance']:,} · 지급 {L['issued']:,} · 스킨 사용 {L['spent_on_skins']:,}"}]
     return [head]
 
 
 def _cards(name, r, s: T.Session) -> list[dict]:
+    if r.get("need_consent"):
+        return [{"type": "consent"}]
+    if r.get("need_goal"):
+        return [{"type": "goal", "options": r["options"]}]
     if r.get("ambiguous") and "error" in r:
         return [{"type": "choices", "options": [m["label"] + "요" for m in r["matches"]]}]
     if "error" in r:
@@ -321,15 +400,23 @@ def _cards(name, r, s: T.Session) -> list[dict]:
     if name == "set_followup":
         return [{"type": "followup", **r}]
     if name == "get_settlement_status":
-        return [{"type": "settle", **r}]
+        return [{"type": "settle", **r, "offer_reco": not s.consent.get("spending")}]
+    if name == "analyze_spending":
+        return [{"type": "match", **r}]
+    if name == "recommend_for_goal":
+        return [{"type": "reco", **r}]
+    if name == "get_reward_status":
+        return [{"type": "rewards", **r}]
     return []
 
 
 SCENE = {"items": "K2 견적", "quote": "K2 견적", "plan": "K3 순서별 계획", "plan_diff": "K4 재계획", "choices": "K4 재계획",
          "approval": "K5 승인 게이트", "exec": "K5 승인 게이트", "failure": "K6 실패 감지", "followup": "K6 실패 감지",
-         "settle": "K7 정착 현황", "status": "K6 상태 추적"}
+         "settle": "K7 정착 현황", "status": "K6 상태 추적", "consent": "K8 소비 분석 동의", "match": "K8 캐릭터 매칭",
+         "goal": "K9 목표 선택", "reco": "K9 맞춤 추천", "rewards": "K10 꿀머니 · 꾸미기"}
 SUBTITLE = {"plan_diff": "계획 수정 중", "choices": "계획 수정 중", "approval": "고객 승인 대기", "exec": "공식 절차 진행 중",
-            "failure": "진행 상태 추적 중", "followup": "진행 상태 추적 중", "status": "진행 상태 추적 중"}
+            "failure": "진행 상태 추적 중", "followup": "진행 상태 추적 중", "status": "진행 상태 추적 중",
+            "consent": "정착 코칭", "match": "정착 코칭", "goal": "정착 코칭", "reco": "정착 코칭", "rewards": "정착 코칭"}
 
 
 # ---------------------------------------------------------------- Agent
@@ -349,9 +436,40 @@ class Agent:
     def _system(self):
         d = self.session.today
         text = SYSTEM_PROMPT.format(today=f"{d.year}.{fmt(d)}")
+        s = self.session
+        if s.stage == "settle":
+            text += SETTLE_PROMPT
+        if s.persona:
+            pi = coach.persona_info(s.persona)
+            text += PERSONA_PROMPT.format(name=pi["name"], type=pi["type"], **PERSONAS[s.persona])
         if os.getenv("LLM_NO_THINK") == "1":  # Qwen3 계열: 추론(생각) 출력 끄기
             text += "\n/no_think"
         return {"role": "system", "content": text}
+
+    def handoff(self) -> str:
+        """담당 캐릭터로 넘길 때 이사 대화를 짧은 상태 요약으로 바꾼다(문맥 한도 여유 · 이전 숫자 허용 목록 초기화)."""
+        summary = coach.compact_summary(self.session)
+        before = len(self.history)
+        self.history = [{"role": "user", "content": summary},
+                        {"role": "assistant", "content": "이사 요약을 확인했어요. 이제 정착을 도와드릴게요."}]
+        self.allowed = guard.extract(summary) | guard.allowed_from(self.session.analysis or {})
+        self.session.log("CONTEXT_COMPACTED", "system", messages_before=before, messages_after=len(self.history),
+                         why="담당 캐릭터 전환 · 문맥 절약 · 숫자 허용 목록 초기화")
+        return summary
+
+    def _fresh_need(self, text: str, called: set) -> str | None:
+        """상태 질문인데 이번 턴에 해당 조회 도구를 부르지 않았으면 그 도구 이름."""
+        s, t = self.session, text.replace(" ", "")
+        avail = {x["function"]["name"] for x in coach.schemas_for(s)}
+        labels = [i["label"].replace(" ", "") for i in s.items.values()]
+        for tool, topic, ask in FRESH_READS:
+            if tool in called or tool not in avail or not re.search(ask, t):
+                continue
+            if topic and re.search(topic, t):
+                return tool
+            if tool == "get_move_status" and s.executed and any(lb and lb in t for lb in labels):
+                return tool
+        return None
 
     def run_turn(self, text: str, forced: tuple | None = None, allow_tools: bool = True) -> dict:
         """forced=(도구, 인자): LLM이 아니라 시스템이 먼저 실행하는 도구(예: 고객 승인 이벤트 → execute_plan).
@@ -372,7 +490,7 @@ class Agent:
             n_sys += 1
             self.allowed |= guard.allowed_from(r)
             entries = _summary(name, args, r)
-            entries[0] = entries[0] | {"sub": "시스템 실행(고객 승인 이벤트 · LLM 경로 밖) · " + entries[0].get("sub", "")}
+            entries[0] = entries[0] | {"sub": "시스템 실행(고객 화면 조작 · LLM 경로 밖) · " + entries[0].get("sub", "")}
             log += entries
             cards += _cards(name, r, self.session)
             cid = f"sys_{name}_{len(self.history)}"
@@ -382,10 +500,11 @@ class Agent:
             self.history.append({"role": "tool", "tool_call_id": cid, "name": name,
                                  "content": json.dumps(r, ensure_ascii=False, default=str)})
         final, llm_error = None, None
+        called = {forced[0]} if forced else set()
         blocked_change, plan_changed = None, False  # 이번 턴에 계획 변경이 막혔는지 / 실제로 바뀌었는지
         for _ in range(MAX_STEPS):
             try:
-                out = self.llm.chat([self._system()] + self.history, T.TOOL_SCHEMAS if allow_tools else [])
+                out = self.llm.chat([self._system()] + self.history, coach.schemas_for(self.session) if allow_tools else [])
             except Exception as e:  # 타임아웃·연결 끊김: 화면·평가가 멈추지 않게 실패로 기록하고 이번 요청은 끝낸다
                 llm_error = f"{type(e).__name__}: {str(e)[:160]}"
                 self.totals["llm_error"] = self.totals.get("llm_error", 0) + 1
@@ -404,6 +523,7 @@ class Agent:
                                                 for c in out["tool_calls"]]})
             for c in out["tool_calls"]:
                 n_tools += 1
+                called.add(c["name"])
                 fn = T.TOOL_IMPLS.get(c["name"])
                 self.session.log("TOOL_CALLED", "llm", tool=c["name"], args=c["arguments"])
                 try:
@@ -425,6 +545,34 @@ class Agent:
                                      "content": json.dumps(r, ensure_ascii=False, default=str)})
         if final is None:
             final = "처리 단계가 너무 길어 여기서 멈췄어요. 다시 말씀해 주세요."
+        need = None if (llm_error or is_event or not allow_tools) else self._fresh_need(text, called)
+        if need:
+            r = T.TOOL_IMPLS[need](self.session)
+            n_sys += 1
+            self.allowed |= guard.allowed_from(r)
+            self.session.log("FRESH_READ", "system", tool=need, why="상태 질문인데 조회 없이 답함 → 시스템이 최신 값 조회 후 다시 답함",
+                             stale_reply=final[:200])
+            log.append({"kind": "block", "title": "조회 근거 가드", "sub": "지금 상태를 묻는데 조회 없이 답함 → 시스템이 최신 값을 조회해 다시 답함"})
+            entries = _summary(need, {}, r)
+            for e in entries:
+                e["by"] = "system"
+            entries[0] = entries[0] | {"sub": "시스템 실행(조회 근거 가드) · " + entries[0].get("sub", "")}
+            log += entries
+            cards += _cards(need, r, self.session)
+            cid = f"sys_{need}_{len(self.history)}"
+            self.history.append({"role": "assistant", "content": "",
+                                 "tool_calls": [{"id": cid, "type": "function", "function": {"name": need, "arguments": "{}"}}]})
+            self.history.append({"role": "tool", "tool_call_id": cid, "name": need,
+                                 "content": json.dumps(r, ensure_ascii=False, default=str)})
+            try:
+                out = self.llm.chat([self._system()] + self.history, [])
+                usage["prompt"] += out["usage"]["prompt"]
+                usage["completion"] += out["usage"]["completion"]
+                final = out["content"] or "최신 내용을 카드로 정리했어요."
+            except Exception as e:
+                llm_error = f"{type(e).__name__}: {str(e)[:160]}"
+                self.session.log("LLM_ERROR", "system", error=llm_error)
+                final = "최신 내용을 카드로 정리했어요."
         final = re.sub(r"^\s*\[시스템 이벤트\][\s:]*", "", final)
         if re.search(r"[\u4e00-\u9fff]", final):  # Qwen이 가끔 섞는 중국어 낱말 제거
             final = re.sub(r"\s*[\u4e00-\u9fff]+\s*", " ", final).strip()

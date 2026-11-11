@@ -85,6 +85,15 @@ class Session:
     audit: AuditLog = field(default_factory=AuditLog)  # 감사 이벤트 로그(해시 체인)
     adapter: object = field(default_factory=adapters.DemoSimulator)   # 기관 연동 어댑터(데모: 시뮬레이터)
     auth: object = field(default_factory=authmod.MockAuthenticator)   # 인증 어댑터(데모: 모의 인증)
+    # ---- 정착 단계(추천 Agent): 이사 계획·승인과 분리된 상태
+    stage: str = "move"                                # move(이사) → settle(정착, 30일째부터)
+    consent: dict = field(default_factory=lambda: {"spending": False})  # 소비 분석·추천 동의(이사 동의와 별도)
+    persona: str | None = None                         # 담당 캐릭터 유형 id(예: FOOD → 달보)
+    goal: str | None = None                            # 고객이 고른 목표(식비 절약 | 저축)
+    analysis: dict | None = None                       # 소비 분석 결과(시스템 계산)
+    reco: dict | None = None                           # 마지막 추천(시스템 계산)
+    missions: dict = field(default_factory=dict)       # mission id -> 참여 정보(고객 버튼으로만)
+    ledger: object = None                              # 꿀머니 원장(rewards.Ledger)
 
     # ------------------------------------------------------------ 공용
     @property
@@ -210,6 +219,14 @@ def decide_item(s: Session, item_id: str, decision: str) -> dict:
     return {"item": i["label"], "decision": decision, "plan_affected": before != _canon(c)}
 
 
+def _won_text(n: int) -> str:
+    """표시용 금액 문자열(예: 60000 → '6만 원'). 숫자 가드와 같은 표기."""
+    man, rest = divmod(int(n), 10000)
+    if man and not rest:
+        return f"{man:,}만 원"
+    return f"{int(n):,}원"
+
+
 def calc_switch_quote(s: Session) -> dict:
     p = data.PRODUCT
     bal = data.ASSUMED_DAILY_BALANCE
@@ -222,6 +239,7 @@ def calc_switch_quote(s: Session) -> dict:
         "rate_diff": diff,
         "assumed_balance": bal,
         "extra_interest_pretax_year": interest,
+        "extra_interest_text": f"연 {_won_text(interest)}(세전)",  # 단위 변환을 LLM에 맡기지 않음
         "assumptions": ["매일 잔액 200만 원 유지", "이전 후 우대조건 모두 충족", "1년 적용·세전"],
         "unconfirmed": ["A은행 기존 혜택 상실", "해지 손실·추가 비용"],
         "net_benefit": "확인 중",
@@ -407,9 +425,40 @@ def _ungrounded(s: Session, ids: list) -> list:
             and not any(w in s.items[iid]["label"].replace(" ", "") for w in said)]
 
 
+def _resolve_item_ids(s: Session, lists: list) -> tuple:
+    """항목 대조: 모델이 id 대신 이름(예: '급여')을 넘기면 시스템이 실제 항목과 맞춘다.
+    하나로 맞으면 id로 바꾸고, 여럿이면 되묻고, 없으면 버린다(계획에 넣지 않음)."""
+    out, mapped, unknown = [], {}, []
+    live = [i for i in s.items.values() if i["confidence"] != "excluded"]
+    for ids in lists:
+        res = []
+        for x in ids or []:
+            if x in s.items:
+                res.append(x)
+                continue
+            q = str(x).replace(" ", "")
+            hits = [i for i in live if i["label"].replace(" ", "") == q] or [i for i in live if q and q in i["label"].replace(" ", "")]
+            if len(hits) == 1:
+                res.append(hits[0]["id"]); mapped[str(x)] = hits[0]["id"]
+            elif len(hits) > 1:
+                return None, {"error": f"'{x}'이(가) {len(hits)}개 항목에 해당해 계획을 바꾸지 않음. 어느 것인지 고객에게 되물을 것",
+                              "ambiguous": True, "query": str(x),
+                              "matches": [{"id": i["id"], "label": i["label"], "kind": i["kind"], "amount": i["amount"]} for i in hits]}, []
+            else:
+                unknown.append(str(x))
+        out.append(res)
+    if mapped or unknown:
+        s.log("ITEM_IDS_CHECKED", "system", mapped=mapped, unknown=unknown, why="모델이 넘긴 항목을 실제 항목과 대조")
+    return out, mapped, unknown
+
+
 def plan_schedule(s: Session, keep_item_ids=None, defer_item_ids=None, include_item_ids=None, undo_item_ids=None) -> dict:
     if not s.items:
         detect_recurring(s)
+    lists, mapped, unknown = _resolve_item_ids(s, [keep_item_ids, defer_item_ids, include_item_ids, undo_item_ids])
+    if lists is None:
+        return mapped  # 여러 항목에 해당하는 이름 → 되묻기
+    keep_item_ids, defer_item_ids, include_item_ids, undo_item_ids = lists
     blocked = _ambiguity_guard(s, (keep_item_ids or []) + (defer_item_ids or []) + (include_item_ids or []) + (undo_item_ids or []))
     if blocked:
         return blocked
@@ -438,6 +487,11 @@ def plan_schedule(s: Session, keep_item_ids=None, defer_item_ids=None, include_i
     h = hashlib.sha256(_canon(body).encode()).hexdigest()[:12]
     prev = s.plan
     changed = prev is None or prev["hash"] != h
+    if prev and changed and _canon(s.constraints) == _canon(prev["constraints"]):
+        # 고객 제약이 그대로인데 날짜만 지나 다시 계산된 경우: 계획을 바꾸지 않는다(승인 유지).
+        # 예: 걸러진 항목만 들어온 호출, 실패 대안을 고르는데 계획 도구를 부른 경우
+        s.log("PLAN_UNCHANGED", "system", why="고객 제약 변화 없음 → 기존 계획 유지", plan_hash=prev["hash"])
+        changed, h = False, prev["hash"]
     if changed:
         version = (prev["version"] + 1) if prev else 1
         plan = {"version": version, "hash": h, "steps": steps, "excluded": excluded,
@@ -489,6 +543,7 @@ def plan_schedule(s: Session, keep_item_ids=None, defer_item_ids=None, include_i
         "invalidated_what": ("승인" if (s.approval and s.approval in stale) else "승인 화면") if approval_invalidated else None,
         "already_requested": already,
         "ignored_items": [{"id": i, "label": s.items[i]["label"]} for i in ignored],
+        "resolved_items": mapped, "unknown_items": unknown,
         "diff": diff,
         "basis": basis,
         "rules": ["첫 급여 전 출금은 다음 주기", "자동송금 D-2영업일 이내 변경 불가", "자동납부 처리 3영업일(가정)", "적금은 만기 후"],
@@ -722,7 +777,7 @@ TOOL_SCHEMAS = [
     _fn("calc_switch_quote", "우리WON으로 옮길 때의 견적(추가 이자, 가정, 미확인 항목)을 시스템이 계산한다."),
     _fn("find_items", "고객이 말한 이름(예: '회비')에 해당하는 반복 항목을 찾는다. 여러 개면 ambiguous=true.",
         {"query": {"type": "string"}}, ["query"]),
-    _fn("plan_schedule", "이전 순서 계획을 만들거나 고친다. 제약은 누적된다. 계획이 바뀌면 새 버전이 되고 기존 승인은 무효가 된다.",
+    _fn("plan_schedule", "이전 순서 계획을 만들거나 고친다. 제약은 누적된다. 계획이 바뀌면 새 버전이 되고 기존 승인은 무효가 된다. 실패 알림의 대안(직접 변경 요청·잔액 유지)을 고를 때는 부르지 않는다(→ set_followup).",
         {"keep_item_ids": {**_ids, "description": "옮기지 않고 유지할 항목 id(예: 적금 만기까지)"},
          "defer_item_ids": {**_ids, "description": "다음 달로 미룰 항목 id"},
          "include_item_ids": {**_ids, "description": "기본 제외 항목 중 포함할 id"},
@@ -730,7 +785,7 @@ TOOL_SCHEMAS = [
     _fn("prepare_approval", "현재 계획 버전의 승인 화면(급여계좌 변경 신청서 초안·통장사본·실행 내용)을 준비한다. 승인은 고객만 할 수 있다."),
     _fn("execute_plan", "고객이 승인한 현재 계획을 공식 절차(모의)로 신청한다. 승인이 없거나 계획이 바뀌었으면 BLOCKED."),
     _fn("get_move_status", "이전 항목별 상태(공식 결과·거래내역·고객 확인)와 실패 알림·대안을 조회한다."),
-    _fn("set_followup", "실패한 항목의 후속 조치를 정한다(option_id: direct_request | keep_balance).",
+    _fn("set_followup", "실패 알림 뒤 고객이 고른 후속 조치를 기록한다. '직접 변경 요청할게요' → direct_request, '(A은행에) 잔액 유지할게요' → keep_balance. 이사 계획·승인은 바꾸지 않는다.",
         {"item_id": {"type": "string"}, "option_id": {"type": "string", "enum": ["direct_request", "keep_balance"]}},
         ["item_id", "option_id"]),
     _fn("get_settlement_status", "이사 후 정착 현황(확인 완료·고객 확인·확인 대기)을 조회한다."),

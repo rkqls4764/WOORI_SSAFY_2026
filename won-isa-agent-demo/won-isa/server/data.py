@@ -128,3 +128,12 @@ def _shape_spending(txs: list[Tx], rng: random.Random) -> None:
 
 
 TRANSACTIONS = build_transactions()
+
+
+def mission_week_txs(start: date) -> list[Tx]:
+    """정착 후 미션 1주의 모의 거래내역(데모): 배달 2회, 그 밖의 외식·카페 3회, 자유적금 납입 1회."""
+    d = lambda k: (start + timedelta(days=k)).isoformat()
+    return [Tx(d(1), -23_000, "체크카드", "배달의민족"), Tx(d(2), -8_500, "체크카드", "김밥천국"),
+            Tx(d(3), -6_200, "체크카드", "스타벅스"), Tx(d(4), -26_000, "체크카드", "쿠팡이츠"),
+            Tx(d(5), -11_000, "체크카드", "동네 한식당"),
+            Tx(d(6), -50_000, "적금이체", "우리 SUPER주거래 자유적금")]

@@ -27,7 +27,7 @@ try:  # .env가 있으면 읽는다(LLM 키 등)
 except ImportError:
     pass
 
-from . import tools as T
+from . import coach as CO, tools as T
 from .agent import Agent
 from .rules import fmt
 
@@ -38,7 +38,7 @@ COOKIE = "won_sid"
 MAX_SESSIONS = 50
 SESSIONS: "OrderedDict[str, Agent]" = OrderedDict()  # 세션 id -> Agent (데모: 메모리)
 
-PRESETS = {"2w": date(2026, 12, 9), "30d": date(2026, 12, 15)}  # 30d = 기준일(11.16)부터 30일째
+PRESETS = {"2w": date(2026, 12, 9), "30d": date(2026, 12, 15), "1w": date(2026, 12, 22)}  # 30d = 기준일(11.16)부터 30일째 · 1w = 정착 후 미션 1주
 
 
 def _sid(request: Request, response: Response) -> str:
@@ -92,6 +92,14 @@ def _state(a: Agent) -> dict:
         "boundary": {"auth": s.auth.name, "auth_mock": s.auth.mock, "adapter": s.adapter.name,
                      "adapter_simulated": s.adapter.simulated},
         "confirm_pending": sum(1 for i in s.items.values() if i["confidence"] == "check" and i["id"] not in s.decisions),
+        # 정착 단계(추천 Agent)
+        "stage": s.stage,
+        "consent": dict(s.consent),
+        "persona": CO.persona_info(s.persona),
+        "goal": s.goal,
+        "missions": s.missions,
+        "honey": CO.ledger(s).summary(),
+        "reco_products": [x["id"] for x in (s.reco or {}).get("products", [])],
     }
 
 
@@ -105,6 +113,22 @@ class Approve(BaseModel):
 
 class Advance(BaseModel):
     preset: str
+
+
+class Persona(BaseModel):
+    type_id: str
+
+
+class Goal(BaseModel):
+    goal: str
+
+
+class Mission(BaseModel):
+    mission_id: str
+
+
+class Skin(BaseModel):
+    skin_id: str
 
 
 class Decide(BaseModel):
@@ -178,16 +202,130 @@ def advance(body: Advance, a: Agent = Depends(_agent)):
     target = PRESETS[body.preset]
     if target <= s.today:
         raise HTTPException(400, "이미 지난 날짜입니다")
+    if body.preset == "1w":
+        return _mission_week(a, target)
     changes = T.advance_to(s, target)
     src = f"{s.adapter.name}({'모의' if s.adapter.simulated else '연동'})"
     pre = [{"kind": "event", "title": f"시간 진행 → {fmt(target)}", "sub": f"상태 변화 {len(changes)}건 · 결과 수신: {src}"}]
     pre += [{"kind": "observe" if c["kind"] == "observed" else "event",
              "title": f"{fmt(date.fromisoformat(c['date']))} {c['item']} → {c['state']}", "sub": c["why"]} for c in changes]
+    if body.preset == "30d" and s.stage != "settle":
+        s.stage = "settle"
+        s.log("STAGE_CHANGED", "system", to="settle", why="이사 30일째 · 정착 단계 도구로 전환")
+        pre.append({"kind": "event", "title": "정착 단계로 전환", "sub": "이사 계획·승인·실행 도구는 숨김 · 상태 조회·추천 도구만"})
+        pay = CO.grant_move_reward(s)
+        if pay and pay["granted"]:
+            pre.append({"kind": "approve", "title": f"꿀머니 {pay['granted']:,} 지급", "sub": "급여 이사 완료(공식 결과) · 시스템 지급 · 1회만"})
     msg = "[시스템 이벤트] 이사 30일째: 정착 현황을 확인하세요" if body.preset == "30d" else f"[시스템 이벤트] {fmt(target)} 기준 상태 변화 {len(changes)}건"
     out = a.run_turn(msg)
     out["log"] = pre + out["log"]
     out["divider"] = "2주 뒤 · " + fmt(target) if body.preset == "2w" else None
     return out | {"state": _state(a)}
+
+
+def _mission_week(a: Agent, target: date):
+    s = a.session
+    if s.stage != "settle":
+        raise HTTPException(400, "정착 단계가 아닙니다")
+    start = s.today
+    T.advance_to(s, target)
+    res = CO.judge_missions(s, start, target)
+    pre = [{"kind": "event", "title": f"시간 진행 → {fmt(target)}", "sub": f"미션 1주 · 판정 {len(res)}건 · 거래내역(모의) 기준"}]
+    for r in res:
+        pay = r["reward"]
+        pre.append({"kind": "observe" if r["achieved"] else "block", "title": f"{r['title']} · {'달성' if r['achieved'] else '미달성'}",
+                    "sub": r["rule"] + (f" → 꿀머니 {pay['granted']:,} 지급" if pay and pay["granted"] else "")})
+    out = a.run_turn(f"[시스템 이벤트] 미션 결과: 판정 {len(res)}건 · 시스템이 꿀머니 지급", forced=("get_reward_status", {}),
+                     allow_tools=False)
+    out["log"] = pre + out["log"]
+    out["divider"] = "미션 1주 뒤 · " + fmt(target)
+    return out | {"state": _state(a)}
+
+
+def _reply(a: Agent, before: str, log: list, cards: list | None = None) -> dict:
+    return {"before": [before], "after": [], "cards": cards or [], "tool_count": 0, "log": log,
+            "usage": {"prompt": 0, "completion": 0}, "latency": 0, "guard_ok": True, "state": _state(a)}
+
+
+@app.post("/api/consent")
+def consent(a: Agent = Depends(_agent)):
+    """고객이 소비 분석·추천에 동의(이사 동의와 별도). 동의 후 시스템이 분석하고 LLM은 결과만 설명한다."""
+    s = a.session
+    if s.stage != "settle":
+        raise HTTPException(400, "정착 단계에서만 동의할 수 있습니다")
+    CO.grant_consent(s)
+    pre = [{"kind": "approve", "title": "고객 동의 · 소비 분석·맞춤 추천", "sub": "카드 결제 최근 90일 · 이사 동의와 별도 · 언제든 철회"}]
+    out = a.run_turn("[시스템 이벤트] 고객 소비 분석 동의 · 시스템이 분석함", forced=("analyze_spending", {}), allow_tools=False)
+    out["log"] = pre + out["log"]
+    return out | {"state": _state(a)}
+
+
+@app.post("/api/persona")
+def persona(body: Persona, a: Agent = Depends(_agent)):
+    """고객이 담당 캐릭터를 수락(또는 다른 캐릭터 선택). 이사 대화를 요약으로 압축하고 담당을 넘긴다."""
+    s = a.session
+    r = CO.set_persona(s, body.type_id)
+    if not r["ok"]:
+        raise HTTPException(400, r["reason"])
+    first = r["previous"] is None
+    pre = [{"kind": "approve", "title": f"고객 선택 · 담당 캐릭터 {r['persona']['name']}", "sub": f"{r['persona']['type']} · 화면 조작(LLM 경로 밖)"}]
+    if first:
+        a.handoff()
+        pre.append({"kind": "event", "title": "담당 넘기기 · 대화 압축", "sub": "이사 대화 → 상태 요약 1개 · 숫자 허용 목록 초기화 · 규칙·가드는 그대로"})
+    out = a.run_turn(f"[시스템 이벤트] 담당 캐릭터: {r['persona']['name']}({r['persona']['type']}) · 고객에게 인사하고 목표를 물을 것",
+                     allow_tools=False)
+    out["log"] = pre + out["log"]
+    if not s.goal:
+        out["cards"] = out["cards"] + [{"type": "goal", "options": CO.CT.GOALS}]
+    return out | {"state": _state(a)}
+
+
+@app.post("/api/goal")
+def goal(body: Goal, a: Agent = Depends(_agent)):
+    s = a.session
+    r = CO.choose_goal(s, body.goal)
+    if not r["ok"]:
+        raise HTTPException(400, r["reason"])
+    pre = [{"kind": "approve", "title": f"고객 선택 · 목표 '{body.goal}'", "sub": "목표는 고객이 고름(소비 특징만으로 정하지 않음)"}]
+    out = a.run_turn(f"[시스템 이벤트] 고객 목표 선택: {body.goal} · 시스템이 추천을 계산함",
+                     forced=("recommend_for_goal", {"goal": body.goal}), allow_tools=False)
+    out["log"] = pre + out["log"]
+    return out | {"state": _state(a)}
+
+
+@app.post("/api/missions/join")
+def mission_join(body: Mission, a: Agent = Depends(_agent)):
+    s = a.session
+    r = CO.join_mission(s, body.mission_id)
+    if not r["ok"]:
+        raise HTTPException(400, r["reason"])
+    pre = [{"kind": "approve", "title": f"고객 참여 · {r['mission']['title']}", "sub": "미션 참여는 화면 버튼으로만 · 판정·지급은 시스템"}]
+    if r.get("already"):
+        return _reply(a, "이미 참여 중인 미션이에요.", pre)
+    out = a.run_turn(f"[시스템 이벤트] 미션 참여: {r['mission']['title']}", allow_tools=False)
+    out["log"] = pre + out["log"]
+    out["cards"] = out["cards"] + [{"type": "next", "label": "일주일 뒤 미션 결과 보기", "preset": "1w"}]
+    return out | {"state": _state(a)}
+
+
+@app.post("/api/skins/buy")
+def skin_buy(body: Skin, a: Agent = Depends(_agent)):
+    s = a.session
+    r = CO.buy_skin(s, body.skin_id)
+    names = {x["id"]: x["name"] for x in CO.CT.SKINS}
+    nm = names.get(body.skin_id, body.skin_id)
+    if r["status"] == "PURCHASED":
+        log = [{"kind": "approve", "title": f"고객 구매 · {nm}", "sub": f"꿀머니 {r['price']:,} 사용 · 잔액 {r['balance']:,} · 현금 유출 없음"}]
+        msg = f"{nm}로 꾸몄어요!"
+    elif r["status"] == "INSUFFICIENT":
+        log = [{"kind": "block", "title": "구매 거부 · 꿀머니 부족", "sub": f"가격 {r['price']:,} · 잔액 {r['balance']:,}"}]
+        msg = "꿀머니가 조금 모자라요. 미션으로 더 모아 봐요."
+    elif r["status"] == "ALREADY_OWNED":
+        log = [{"kind": "approve", "title": f"착용 · {nm}", "sub": "이미 가진 스킨"}]
+        msg = f"{nm}로 바꿨어요."
+    else:
+        raise HTTPException(400, "알 수 없는 스킨")
+    return _reply(a, msg, log, [{"type": "rewards", **CO.get_reward_status(s)}])
 
 
 @app.get("/api/state")

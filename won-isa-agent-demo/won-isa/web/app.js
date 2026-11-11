@@ -5,7 +5,7 @@ const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<
 const won = (n) => Number(n).toLocaleString("ko-KR");
 const md = (iso) => { const [, m, d] = iso.split("-").map(Number); return `${m}.${String(d).padStart(2, "0")}`; };
 
-let busy = false, logNo = 0, currentHash = null;
+let busy = false, logNo = 0, currentHash = null, persona = null;
 
 async function post(path, body) {
   const r = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) });
@@ -24,8 +24,9 @@ function scrollDown() { const m = msgs(); requestAnimationFrame(() => m.scrollTo
 function userBubble(text) {
   const r = el("div", "row me"); r.append(el("div", "bub", esc(text))); msgs().append(r);
 }
+const avatar = () => (persona ? persona.img : "/assets/avatar_wibee.png");
 function botBubble(text) {
-  const r = el("div", "row"); r.append(img("/assets/avatar_wibee.png", "ava"), el("div", "bub", esc(text))); msgs().append(r); return r;
+  const r = el("div", "row"); r.append(img(avatar(), "ava" + (persona ? " char" : "")), el("div", "bub", esc(text))); msgs().append(r); return r;
 }
 function img(src, cls) { const i = el("img", cls); i.src = src; i.alt = ""; return i; }
 function typing() { const r = botBubble("•••"); r.classList.add("typing"); scrollDown(); return r; }
@@ -174,8 +175,108 @@ function settleView(c, bubbles) {
       <span class="tag ${tone[r.tag] || "t-gray"}">${esc(r.tag)}</span></div>`).join("")}</div>`;
   const row = el("div", "row"); row.append(img("/assets/avatar_wibee.png", "ava"), el("div", "bub", esc(bubbles.join("\n"))));
   const b = el("button", "cta", "남은 항목 확인하기"); b.onclick = () => { show("chat"); send("남은 항목 확인해 줘"); };
-  s.append(row, b, el("div", "rule", esc(c.rule) + "요"));
+  s.append(row, b);
+  if (c.offer_reco) {
+    const r2 = el("button", "cta ghost2", "소비 분석하고 담당 캐릭터 찾기");
+    r2.onclick = () => { show("chat"); botBubble("이사가 거의 끝났어요. 소비 패턴에 맞는 담당 캐릭터를 찾아 드릴까요?"); msgs().append(consentCard()); scrollDown(); };
+    s.append(r2);
+  }
+  s.append(el("div", "rule", esc(c.rule) + "요"));
   show("settle");
+}
+
+// ---------------------------------------------------------------- 정착 단계(추천 Agent) 카드
+function consentCard() {
+  const k = el("div", "card indent consent");
+  k.innerHTML = `<h4>소비 분석 동의 <span class="tag t-gray">선택</span></h4>
+    <div class="kv"><span>쓰는 정보</span><b>카드 결제 내역 최근 90일</b></div>
+    <div class="kv"><span>목적</span><b>소비 유형 분석 · 맞춤 추천</b></div>
+    <div class="kv"><span>이사 동의와</span><b>별도 · 언제든 철회</b></div>`;
+  const b = el("button", "cta", "동의하고 분석하기");
+  b.onclick = () => { b.disabled = true; run("고객: 소비 분석 동의(화면 조작)", () => post("/api/consent"), null); };
+  k.append(b);
+  return k;
+}
+
+function matchCard(c) {
+  const m = c.match, rc = c.recommended_character;
+  const k = el("div", "card indent match");
+  const bars = c.by_category.slice(0, 5).map((r) => `<div class="bar-row"><span>${esc(r.category)}</span>
+      <i><b style="width:${Math.round(r.share * 100)}%"></b></i><em>${Math.round(r.share * 100)}%</em></div>`).join("");
+  k.innerHTML = `<h4>소비 유형 · ${esc(m.type)} <span class="tag t-g">시스템 계산</span></h4>
+    <div class="char-hero"><img src="${rc.img}" alt=""><div><small>담당 캐릭터 제안</small><b>${esc(rc.name)}</b><span>${esc(m.why)}</span></div></div>
+    ${bars}<div class="muted">카드 결제 ${c.period.days}일 · 월평균 ${won(c.card_monthly_avg)}원 · 배달 주 ${c.delivery.weekly_avg}회</div>${basisBlock(c.basis)}`;
+  const go = el("button", "cta", `${esc(rc.name)}와 함께하기`);
+  go.onclick = () => choosePersona(rc.id, rc.name);
+  const other = el("div", "char-pick");
+  c.characters.filter((x) => x.id !== rc.id).forEach((x) => {
+    const b = el("button", null, `<img src="${x.img}" alt=""><span>${esc(x.name)}</span><small>${esc(x.type)}</small>`);
+    b.onclick = () => choosePersona(x.id, x.name); other.append(b);
+  });
+  const lab = el("div", "muted", "다른 캐릭터를 고를 수도 있어요");
+  k.append(go, lab, other);
+  return k;
+}
+
+function goalCard(c) {
+  const w = el("div", "choices goal");
+  c.options.forEach((g) => { const b = el("button", null, esc(g)); b.onclick = () => { w.querySelectorAll("button").forEach((x) => { x.disabled = true; }); run(`고객: 목표 '${g}' 선택(화면 조작)`, () => post("/api/goal", { goal: g }), g); }; w.append(b); });
+  return w;
+}
+
+function recoCard(c) {
+  const k = el("div", "card indent reco");
+  const prods = c.products.map((p) => `<div class="prod"><div><b>${esc(p.name)}</b><span class="tag t-b">${esc(p.kind)}</span></div>
+      <div class="s">${esc(p.fit)} · ${esc(p.terms)}</div><div class="s">${esc(p.rate)}</div>
+      <div class="s link">${esc(p.link_to_move)}</div></div>`).join("");
+  k.innerHTML = `<h4>'${esc(c.goal)}' 맞춤 추천 <span class="tag t-g">시스템 계산</span></h4>
+    <div class="sec">미션</div><div class="missions"></div><div class="sec">예금성 상품</div>${prods}
+    <div class="muted">${c.rules.map(esc).join(" · ")} · 상품 정보 ${esc(c.as_of)} 확인</div>`;
+  const box = k.querySelector(".missions");
+  c.missions.forEach((m) => {
+    const joined = (c.joined || []).includes(m.id);
+    const row = el("div", "mission", `<div><b>${esc(m.title)}</b><span class="s">${esc(m.calc)}</span>
+      <span class="honey">달성 시 꿀머니 ${won(m.reward)}</span></div>`);
+    const b = el("button", joined ? "join done" : "join", joined ? "참여 중" : "참여하기");
+    b.disabled = joined;
+    b.onclick = () => { b.disabled = true; b.textContent = "참여 중"; b.classList.add("done"); run(`고객: 미션 참여 '${m.title}'(화면 조작)`, () => post("/api/missions/join", { mission_id: m.id }), null); };
+    row.append(b); box.append(row);
+  });
+  return k;
+}
+
+function rewardsCard(c) {
+  const L = c.ledger, p = c.persona;
+  const k = el("div", "card indent rewards");
+  const eq = c.skins.find((s) => s.id === L.equipped);
+  const missions = c.missions.map((m) => `<div class="kv"><span>${esc(m.title)}</span><span class="tag ${m.status === "달성" ? "t-g" : m.status === "미달성" ? "t-r" : "t-y"}">${esc(m.status)}</span></div>`).join("");
+  k.innerHTML = `<h4>꿀머니 · 꾸미기 <span class="tag t-g">시스템 원장</span></h4>
+    <div class="honey-hero">${p ? `<div class="char-wrap ${L.equipped ? "sk-" + L.equipped : ""}"><img src="${p.img}" alt=""></div>` : ""}
+      <div><small>꿀머니 잔액</small><b>${won(L.balance)}</b><span>받은 꿀머니 ${won(L.issued)} · 꾸미기에 쓴 꿀머니 ${won(L.spent_on_skins)}</span>
+      ${eq ? `<span class="tag t-b">착용 중 · ${esc(eq.name)}</span>` : ""}</div></div>
+    ${missions}<div class="sec">꾸미기 상점</div><div class="skins"></div>
+    <div class="muted">지급·판정은 시스템 · 구매는 화면에서만 · 1인 누적 한도 ${won(L.cap)} · 꾸미기에 쓴 꿀머니는 현금으로 나가지 않음</div>`;
+  const box = k.querySelector(".skins");
+  c.skins.forEach((s) => {
+    const b = el("button", s.owned ? "skin owned" : "skin", `<i class="sw sk-${s.id}"></i><span>${esc(s.name)}</span><small>${s.owned ? "보유" : won(s.price) + "꿀"}</small>`);
+    b.onclick = () => run(`고객: 스킨 '${s.name}'(화면 조작)`, () => post("/api/skins/buy", { skin_id: s.id }), null);
+    box.append(b);
+  });
+  return k;
+}
+
+function choosePersona(id, name) {
+  document.querySelectorAll(".match button").forEach((b) => { b.disabled = true; });
+  run(`고객: 담당 캐릭터 '${name}' 선택(화면 조작)`, () => post("/api/persona", { type_id: id }), null);
+}
+
+function applyPersona(p) {
+  persona = p;
+  const h = $("#persona-head");
+  $("#view-chat").classList.toggle("persona", !!p);
+  if (!p) { h.classList.add("hidden"); $("#input").placeholder = "위비에게 요청하기"; return; }
+  h.querySelector("img").src = p.img; h.querySelector("b").textContent = p.name; h.querySelector("small").textContent = `${p.type} 담당`;
+  h.classList.remove("hidden"); $("#input").placeholder = `${p.name}에게 요청하기`;
 }
 
 // ---------------------------------------------------------------- 응답 그리기
@@ -203,6 +304,12 @@ function renderReply(r) {
     else if (c.type === "failure") { const f = failureCard(c); msgs().append(f.card); trailing.push(...f.trailing); }
     else if (c.type === "followup") msgs().append(followupCard(c));
     else if (c.type === "status") msgs().append(statusCard(c));
+    else if (c.type === "consent") msgs().append(consentCard());
+    else if (c.type === "match") { const m = matchCard(c); msgs().append(m); focus = m; }
+    else if (c.type === "goal") trailing.push(goalCard(c));
+    else if (c.type === "reco") { const q = recoCard(c); msgs().append(q); focus = q; }
+    else if (c.type === "rewards") { const q = rewardsCard(c); msgs().append(q); focus = q; }
+    else if (c.type === "next") { const b = el("button", "cta", esc(c.label)); b.onclick = () => { b.disabled = true; advance(c.preset); }; trailing.push(b); }
   }
   r.after.forEach(botBubble);
   trailing.forEach((t) => msgs().append(t));
@@ -249,6 +356,7 @@ function renderState(s) {
   $("#mode").textContent = s.mode === "scripted" ? "대본 모드(API 키 없음)" : `LLM 모드 · ${s.model}`;
   $("#llm-pill").textContent = s.mode === "scripted" ? "대본 모드 · 같은 도구·검증" : `${s.model} · temperature 0`;
   markStaleApprovals();
+  applyPersona(s.persona);
 }
 
 // ---------------------------------------------------------------- 동작
@@ -287,7 +395,8 @@ function decide(itemId, decision, label) {
 }
 
 async function advance(preset) {
-  run(preset === "2w" ? "시간 진행: 2주 뒤" : "시간 진행: 이사 30일째", () => post("/api/advance", { preset }), null);
+  const label = { "2w": "시간 진행: 2주 뒤", "30d": "시간 진행: 이사 30일째", "1w": "시간 진행: 미션 1주 뒤" }[preset];
+  run(label, () => post("/api/advance", { preset }), null);
 }
 
 async function reset() {
@@ -312,6 +421,7 @@ document.addEventListener("keydown", (e) => {
   if (e.key === "r" || e.key === "R") reset();
   if (e.key === "2") advance("2w");
   if (e.key === "3") advance("30d");
+  if (e.key === "4") advance("1w");
 });
 
 const REC = new URLSearchParams(location.search).has("rec");
