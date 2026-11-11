@@ -13,6 +13,9 @@
   <button data-act="2w" title="2">2주 뒤</button>
   <button data-act="30d" title="3">30일째</button>
   <span class="hint">단축키 R · 2 · 3</span>
+  <a href="/audit.html" target="_blank">감사 로그</a>
+  <a href="/boundary.html" target="_blank">데모·운영 경계</a>
+  <a href="/eval.html" target="_blank">평가 결과</a>
 </div>
 
 <div class="stage" id="stage">
@@ -74,6 +77,7 @@
         <div><dt>승인 없는 실행</dt><dd class="good" id="st-unauth">0건</dd></div>
       </dl>
       <p class="sub" id="st-sub">차단 0건 · 중복 실행 방지 0건 · 기준일 2026.11.16</p>
+      <p class="sub trust" id="st-trust">감사 로그 0건</p>
     </section>
     <footer>
       <h3>숫자는 시스템 계산 · LLM은 도구 선택과 설명만</h3>
@@ -88,7 +92,7 @@
 
 <div class="caption hidden" id="caption"></div>
 <div class="overlay hidden" id="overlay"></div>
-<div class="auth hidden" id="auth"><div><b>모의 인증</b><span>생체 인증 확인 중…</span></div></div>
+<div class="auth hidden" id="auth"><div><b>모의 인증</b><span>생체 인증 확인 중…</span><small>데모: 본인 확인 없음 · 운영: 본인 인증·전자서명</small></div></div>
 <script src="/app.js"></script>
 </body>
 </html>

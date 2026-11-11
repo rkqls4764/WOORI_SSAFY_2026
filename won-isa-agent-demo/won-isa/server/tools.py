@@ -16,8 +16,9 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 
-from . import data
-from .rules import add_months, adjust_to_business_day, first_movable_cycle, fmt, next_occurrence
+from . import adapters, auth as authmod, data, detector
+from .audit import AuditLog
+from .rules import RULES, add_months, adjust_to_business_day, first_movable_cycle, fmt, next_occurrence
 
 # ---------------------------------------------------------------- 상태 머신
 STATES = {
@@ -56,7 +57,7 @@ LABELS = {  # 시스템 정규화: 상대방명 → 표시 이름(원문 적요�
     "이서연": ("BOOK", "독서모임 회비"),
     "웨이브 구독": ("OTT", "웨이브 구독"),
 }
-KIND = {"급여입금": "급여", "CMS자동납부": "자동납부", "자동송금": "자동송금", "적금이체": "적금", "즉시이체": "직접송금"}
+KIND = detector.KIND
 INSTITUTION = {"MGT": "한빛아파트관리사무소", "TEL": "SKT", "INS": "한화생명"}
 
 
@@ -70,7 +71,7 @@ class Session:
     items: dict = field(default_factory=dict)          # id -> 탐지된 반복 항목
     item_state: dict = field(default_factory=dict)     # id -> 상태
     evidence: dict = field(default_factory=lambda: defaultdict(list))
-    constraints: dict = field(default_factory=lambda: {"keep": [], "defer": [], "include": []})
+    constraints: dict = field(default_factory=lambda: {"keep": [], "defer": [], "include": [], "exclude": []})
     plans: list = field(default_factory=list)          # 버전별 계획
     approval: dict | None = None                       # {"plan_hash", "version", "at"}
     pending_approval: dict | None = None               # 승인 화면을 띄운 계획 {"plan_hash","version"}
@@ -79,6 +80,11 @@ class Session:
     counters: dict = field(default_factory=lambda: {"blocked": 0, "executed_without_approval": 0, "dup_prevented": 0})
     fired_events: set = field(default_factory=set)
     last_user: str = ""                                # 마지막 고객 발화(시스템 이벤트 제외) — 모호성 가드용
+    sid: str = "local"                                 # 사용자 세션 id(승인 토큰이 여기에 묶임)
+    decisions: dict = field(default_factory=dict)      # id -> "confirmed" | "excluded" (고객이 항목별로 정함)
+    audit: AuditLog = field(default_factory=AuditLog)  # 감사 이벤트 로그(해시 체인)
+    adapter: object = field(default_factory=adapters.DemoSimulator)   # 기관 연동 어댑터(데모: 시뮬레이터)
+    auth: object = field(default_factory=authmod.MockAuthenticator)   # 인증 어댑터(데모: 모의 인증)
 
     # ------------------------------------------------------------ 공용
     @property
@@ -93,6 +99,10 @@ class Session:
             raise TransitionError(f"{item_id}: {STATES[old]} → {STATES[new]} 전이 불가")
         self.item_state[item_id] = new
         self.evidence[item_id].append({"date": self.today.isoformat(), "state": STATES[new], "why": why})
+        self.log("ITEM_STATE", "system", item=item_id, **{"from": STATES[old], "to": STATES[new]}, why=why)
+
+    def log(self, type_: str, actor: str, **payload):
+        return self.audit.append(type_, actor, payload, self.today.isoformat())
 
     def salary_date(self) -> date:
         return adjust_to_business_day(next_occurrence(25, self.today), backward=True)
@@ -111,39 +121,14 @@ def get_transactions(s: Session, months: int = 6) -> dict:
 
 
 def detect_recurring(s: Session) -> dict:
-    groups = defaultdict(list)
-    for t in data.TRANSACTIONS:
-        if t.channel not in KIND or abs(t.amount) <= 100:
-            continue  # 1원 송금 등 소액은 제외(적요 원문도 사용하지 않음)
-        groups[(t.counterparty, t.channel)].append(t)
     found, observations = [], []
-    for (cp, ch), rows in groups.items():
-        if len(rows) < 3:
-            continue
-        ds = [date.fromisoformat(r.date) for r in rows]
-        gaps = [(b - a).days for a, b in zip(ds, ds[1:])]
-        med = statistics.median(gaps)
-        if not 25 <= med <= 35:
-            continue
-        mad = statistics.median([abs(g - med) for g in gaps])
-        amts = [abs(r.amount) for r in rows]
-        cv = statistics.pstdev(amts) / statistics.mean(amts)
+    for d in detector.detect(data.TRANSACTIONS, s.today):
+        cp = d["counterparty"]
         iid, label = LABELS.get(cp, ("X" + hashlib.md5(cp.encode()).hexdigest()[:4], cp))
-        kind = KIND[ch]
-        last = ds[-1]
-        active = (s.today - last).days <= 45
-        conf, note = "high", ""
-        if not active:
-            conf, note = "excluded", f"마지막 출금 {fmt(last)} → 해지된 것으로 보고 옮기지 않음"
-        elif kind == "직접송금":
-            conf, note = "check", "직접 보내는 송금·날짜 불규칙 → 고객 확인 필요"
-        elif mad > 3:
-            conf, note = "check", "날짜 불규칙 → 고객 확인 필요"
-        elif cv > 0.10:
-            conf, note = "check", f"금액 변동(변동계수 {cv:.2f}) → 금액은 '확인 필요'로 표시"
         item = {
-            "id": iid, "label": label, "kind": kind, "day": ds[-1].day if kind != "급여" else 25,
-            "amount": amts[-1], "count": len(rows), "last": last.isoformat(), "confidence": conf, "note": note,
+            "id": iid, "label": label, "kind": d["kind"], "day": d["last_day"] if d["kind"] != "급여" else 25,
+            "amount": d["amount"], "count": d["count"], "last": d["last"].isoformat(),
+            "confidence": d["confidence"], "note": d["note"], "median_gap": d["median_gap"], "code": d["code"],
         }
         if iid == "SAV":
             item["maturity"] = data.SAVINGS["maturity"].isoformat()
@@ -152,20 +137,77 @@ def detect_recurring(s: Session) -> dict:
         if iid == "CLB":
             item["day"] = 5
         found.append(item)
-        if note:
-            observations.append(f"{label}: {note}")
+        if item["note"]:
+            observations.append(f"{label}: {item['note']}")
     order =["SAL", "TEL", "MGT", "INS", "CLB", "SAV", "BOOK", "OTT"]
     found.sort(key=lambda x: order.index(x["id"]) if x["id"] in order else 99)
     s.items = {i["id"]: i for i in found}
     for i in found:
         s.item_state.setdefault(i["id"], "PLANNED")
     candidates = [i for i in found if i["kind"] in ("급여", "자동납부", "자동송금", "적금") and i["confidence"] != "excluded"]
+    s.log("ITEMS_DETECTED", "system", rule=detector.RULE_TEXT,
+          items=[{"id": i["id"], "confidence": i["confidence"], "code": i["code"], "count": i["count"]} for i in found])
     return {
         "patterns_found": len(found),
         "move_candidates": len(candidates),
         "items": [{k: v for k, v in i.items() if k in ("id", "label", "kind", "day", "amount", "confidence", "note")} for i in found],
         "observations": observations,
+        "rule": detector.RULE_TEXT,
     }
+
+
+def items_card(s: Session) -> dict:
+    """탐지 항목 확인 카드: 탐지 근거와 고객의 항목별 결정(포함·제외·확정) 상태."""
+    rows = []
+    for i in s.items.values():
+        iid, d = i["id"], s.decisions.get(i["id"])
+        if i["confidence"] == "excluded":
+            status = "해지 추정"
+        elif d == "excluded":
+            status = "고객 제외"
+        elif d == "confirmed":
+            status = "고객 확정"
+        elif i["confidence"] == "check":
+            status = "확인 필요"
+        else:
+            status = "자동 탐지"
+        in_plan = (i["confidence"] != "excluded" and d != "excluded"
+                   and (i["kind"] != "직접송금" or iid in s.constraints["include"]))
+        open_ = s.item_state.get(iid) in ("PLANNED", "KEPT", "DEFERRED", "APPROVED")
+        rows.append({"id": iid, "label": i["label"], "kind": i["kind"], "amount": i["amount"],
+                     "evidence": f"{i['count']}회 · 간격 중앙값 {i['median_gap']:g}일", "status": status, "note": i["note"],
+                     "in_plan": in_plan, "can_decide": i["confidence"] != "excluded" and iid != "SAL" and open_})
+    return {"type": "items", "rows": rows, "rule": detector.RULE_TEXT,
+            "pending": sum(r["status"] == "확인 필요" for r in rows)}
+
+
+def decide_item(s: Session, item_id: str, decision: str) -> dict:
+    """고객이 화면에서 항목별로 정한다(LLM 경로 밖). decision: confirm(확정) | include(포함) | exclude(제외)."""
+    if item_id not in s.items:
+        return {"error": f"알 수 없는 항목 id: {item_id}"}
+    i = s.items[item_id]
+    if i["confidence"] == "excluded" or item_id == "SAL":
+        return {"error": "이 항목은 바꿀 수 없습니다"}
+    if s.item_state.get(item_id) in ("REQUESTED", "DONE", "PENDING", "FAILED"):
+        return {"error": "이미 신청된 항목은 여기서 바꿀 수 없습니다(변경 신청 필요)"}
+    c, before = s.constraints, _canon(s.constraints)
+    if decision == "exclude":
+        s.decisions[item_id] = "excluded"
+        for k in ("include", "keep", "defer"):
+            if item_id in c[k]:
+                c[k].remove(item_id)
+        if item_id not in c["exclude"]:
+            c["exclude"].append(item_id)
+    elif decision in ("include", "confirm"):
+        s.decisions[item_id] = "confirmed"
+        if item_id in c["exclude"]:
+            c["exclude"].remove(item_id)
+        if decision == "include" and i["kind"] == "직접송금" and item_id not in c["include"]:
+            c["include"].append(item_id)
+    else:
+        return {"error": f"알 수 없는 결정: {decision}"}
+    s.log("ITEM_DECIDED", "customer", item=item_id, decision=decision, detected_as=i["confidence"], reason=i["code"])
+    return {"item": i["label"], "decision": decision, "plan_affected": before != _canon(c)}
 
 
 def calc_switch_quote(s: Session) -> dict:
@@ -185,6 +227,15 @@ def calc_switch_quote(s: Session) -> dict:
         "net_benefit": "확인 중",
         "rule": "미확인 금액을 0원으로 넣지 않음",
         "source": p["source"],
+        "basis": {
+            "sources": [f"상품 조건: {p['source']}", f"이전 전 금리: A은행 입출금 연 {data.OLD_ACCOUNT_RATE}%(가정값)"],
+            "rules": ["추가 이자 = 가정 잔액 × 금리 차이 (시스템 계산, LLM은 계산하지 않음)",
+                      "미확인 금액은 0원으로 넣지 않음 → 총순혜택은 '확인 중'"],
+            "assumptions": [f"일평균 잔액 {bal // 10000}만 원 유지(우대금리 적용 한도 {p['cap_balance'] // 10000}만 원)",
+                            "우대조건 모두 충족: " + " · ".join(f"{b['name']} +{b['rate']}%p" for b in p["bonus"]),
+                            "1년 적용 · 세전"],
+            "confirm": ["A은행 기존 혜택 상실 여부", "해지 손실·추가 비용"],
+        },
     }
 
 
@@ -198,26 +249,38 @@ def find_items(s: Session, query: str) -> dict:
     }
 
 
-def _build_steps(s: Session) -> tuple[list, list]:
+def _build_steps(s: Session) -> tuple[list, list, dict]:
     sal = s.salary_date()
     keep, defer, include = set(s.constraints["keep"]), set(s.constraints["defer"]), set(s.constraints["include"])
+    exclude = set(s.constraints.get("exclude", []))
     steps, excluded, groups = [], [], defaultdict(list)
+    applied = defaultdict(list)  # 규칙 id -> 적용된 항목 이름
     for i in s.items.values():
         iid = i["id"]
         if i["confidence"] == "excluded":
             excluded.append({"id": iid, "label": i["label"], "reason": i["note"]})
             continue
-        if i["kind"] == "직접송금" and iid not in include:
-            excluded.append({"id": iid, "label": i["label"], "reason": "직접 보내는 송금 → 고객 확인 후 새 계좌에서 설정"})
+        if iid in exclude and iid != "SAL":
+            excluded.append({"id": iid, "label": i["label"], "reason": "고객이 제외 → 옮기지 않음"})
+            continue
+        if i["kind"] == "직접송금":
+            if iid not in include:
+                excluded.append({"id": iid, "label": i["label"], "reason": "직접 보내는 송금 → 고객 확인 후 새 계좌에서 설정"})
+            else:
+                steps.append({"key": f"manual:{iid}", "title": i["label"], "items": [iid], "action": "manual",
+                              "date": sal.isoformat(), "item_dates": {iid: sal.isoformat()},
+                              "sub": "직접 보내는 송금 → 첫 급여 뒤 새 계좌에서 고객이 직접", "badge": "고객"})
             continue
         if i["kind"] in ("자동납부", "자동송금"):
-            due, why, detail = first_movable_cycle(i["kind"], i["day"], s.today, sal)
+            due, why, detail, rule_ids = first_movable_cycle(i["kind"], i["day"], s.today, sal)
             if iid in defer:
                 due2 = adjust_to_business_day(next_occurrence(i["day"], add_months(date(due.year, due.month, 1), 1)))
                 steps.append({"key": f"defer:{iid}", "title": i["label"], "items": [iid], "action": "defer",
                               "date": due2.isoformat(), "item_dates": {iid: due2.isoformat()},
                               "sub": f"고객 요청 → 다음 달({fmt(due2)} 출금부터)", "badge": "다음 달"})
                 continue
+            for rid in rule_ids:
+                applied[rid].append(i["label"])
             groups[(why, "다음 주기" in why)].append((i, due, detail))
     # 1) 급여
     if "SAL" in s.items:
@@ -234,15 +297,43 @@ def _build_steps(s: Session) -> tuple[list, list]:
                       "action": "move", "date": rows[0][1].isoformat(),
                       "item_dates": {r[0]["id"]: r[1].isoformat() for r in rows}, "sub": f"{why} ({dates}부터)",
                       "detail": rows[0][2], "badge": "다음 달" if is_next else "대기"})
-    # deferred는 move 뒤로
-    steps.sort(key=lambda st: {"payroll": 0, "observe": 1, "move": 2, "defer": 3}.get(st["action"], 9))
+    # deferred·직접송금은 move 뒤로
+    steps.sort(key=lambda st: {"payroll": 0, "observe": 1, "move": 2, "defer": 3, "manual": 4}.get(st["action"], 9))
     # 3) 적금
-    if "SAV" in s.items:
+    if "SAV" in s.items and "SAV" not in exclude:
         mat = date.fromisoformat(s.items["SAV"]["maturity"])
         sub = f"만기 {fmt(mat)}까지 유지(고객 요청)" if "SAV" in keep else f"만기 {fmt(mat)} 후 이전(중도해지 손실 0원)"
         steps.append({"key": "savings", "title": "적금", "items": ["SAV"], "action": "keep", "date": mat.isoformat(), "item_dates": {"SAV": mat.isoformat()},
                       "sub": sub, "badge": "만기 후"})
-    return steps, excluded
+        if "SAV" not in keep:
+            applied["SAVINGS_MATURITY"].append("적금")
+    return steps, excluded, _plan_basis(s, applied, steps)
+
+
+def _pending_confirm(s: Session, steps: list) -> list:
+    """계획에 들어 있는데 '확인 필요'로 탐지됐고 고객이 아직 정하지 않은 항목."""
+    in_plan = {iid for st in steps for iid in st["items"]}
+    return [i for i in s.items.values() if i["id"] in in_plan and i["confidence"] == "check" and i["id"] not in s.decisions]
+
+
+def _plan_basis(s: Session, applied: dict, steps: list) -> dict:
+    """계획 카드에 붙는 근거: 데이터 출처 / 적용 규칙 / 가정 / 고객 확인 필요."""
+    tx = get_transactions(s)
+    rules, assumptions = [], []
+    for rid, labels in applied.items():
+        r = RULES[rid]
+        (assumptions if r["kind"] == "가정" else rules).append(f"{'·'.join(labels)}: {r['text']} — {r['basis']}")
+    confirm = [f"{i['label']}: {i['note']}" for i in _pending_confirm(s, steps)]
+    confirm += [f"{i['label']}: 직접 보내는 송금 → 포함할지 고객 확인" for i in s.items.values()
+                if i["kind"] == "직접송금" and i["confidence"] != "excluded" and i["id"] not in s.decisions]
+    if "SAL" in s.items:
+        assumptions.append(f"급여일: 최근 {s.items['SAL']['count']}회 입금 기준 매월 25일(휴일이면 직전 영업일)")
+        confirm.append("급여: 회사 담당자의 처리 일정(신청서는 고객이 전달)")
+    return {
+        "sources": [f"A은행 입출금 거래내역 {tx['count']}건 · {tx['months']}개월(마이데이터 동의 범위, 가상 데이터)",
+                    "영업일: 공휴일 달력(holidays KR)"],
+        "rules": rules, "assumptions": assumptions, "confirm": confirm,
+    }
 
 
 _PARTICLES = ("으로", "에서", "까지", "부터", "은", "는", "이", "가", "을", "를", "도", "만", "요", "로", "의", "랑", "과", "와")
@@ -271,17 +362,49 @@ def _ambiguous_refs(s: Session, text: str) -> list[tuple[str, list]]:
     return out
 
 
+def _said_words(text: str) -> set[str]:
+    """고객 발화의 낱말(조사 최대 2개 뗀 형태 포함, 2글자 이상)."""
+    out = set()
+    for tok in re.split(r"[^0-9A-Za-z가-힣]+", text):
+        t = tok
+        out.add(t)
+        for _ in range(2):
+            p = next((p for p in _PARTICLES if t.endswith(p) and len(t) - len(p) >= 2), None)
+            if not p:
+                break
+            t = t[: -len(p)]
+            out.add(t)
+    return {w for w in out if len(w) >= 2}
+
+
 def _ambiguity_guard(s: Session, ids: list) -> dict | None:
     """LLM이 모호한 말을 한 항목으로 '찍어서' 계획을 바꾸려 하면 막고 되묻게 한다."""
     text = s.last_user.replace(" ", "")
-    for term, hits in _ambiguous_refs(s, s.last_user):
+    refs = _ambiguous_refs(s, s.last_user)
+
+    def ask(term, hits, why):
+        return {"error": f"고객이 말한 '{term}'이(가) {len(hits)}개 항목에 해당해 계획을 바꾸지 않음{why}. 어느 것인지 고객에게 되물을 것",
+                "ambiguous": True, "query": term,
+                "matches": [{"id": i["id"], "label": i["label"], "kind": i["kind"], "amount": i["amount"]} for i in hits]}
+
+    for term, hits in refs:
         hit_ids = {i["id"] for i in hits}
         named = any(i["label"].replace(" ", "") in text for i in hits)
         if hit_ids & set(ids) and not named:
-            return {"error": f"고객이 말한 '{term}'이(가) {len(hits)}개 항목에 해당해 계획을 바꾸지 않음. 어느 것인지 고객에게 되물을 것",
-                    "ambiguous": True, "query": term,
-                    "matches": [{"id": i["id"], "label": i["label"], "kind": i["kind"], "amount": i["amount"]} for i in hits]}
+            return ask(term, hits, "")
+    # 모호한 말이 있는 발화에서 고객이 말하지 않은 항목으로 바꾸려 하면(예: '회비' → '관리비') 되묻기
+    extra = _ungrounded(s, ids)
+    if extra and refs:
+        term, hits = refs[0]
+        return ask(term, hits, f"(고객이 말하지 않은 '{s.items[extra[0]]['label']}'(으)로 바꾸려 함)")
     return None
+
+
+def _ungrounded(s: Session, ids: list) -> list:
+    """이번 발화에 나오지 않았고 기존 계획 제약에도 없는 새 항목 id."""
+    said, prior = _said_words(s.last_user), {i for v in s.constraints.values() for i in v}
+    return [iid for iid in dict.fromkeys(ids) if iid in s.items and iid not in prior
+            and not any(w in s.items[iid]["label"].replace(" ", "") for w in said)]
 
 
 def plan_schedule(s: Session, keep_item_ids=None, defer_item_ids=None, include_item_ids=None, undo_item_ids=None) -> dict:
@@ -290,17 +413,27 @@ def plan_schedule(s: Session, keep_item_ids=None, defer_item_ids=None, include_i
     blocked = _ambiguity_guard(s, (keep_item_ids or []) + (defer_item_ids or []) + (include_item_ids or []) + (undo_item_ids or []))
     if blocked:
         return blocked
+    # 항목 근거 가드: 고객이 말하지 않은 새 항목은 계획에 넣지 않고 걸러낸다(막지 않음 → 말한 항목은 그대로 반영)
+    ignored = _ungrounded(s, (keep_item_ids or []) + (defer_item_ids or []) + (include_item_ids or []) + (undo_item_ids or []))
+    if ignored:
+        keep_item_ids, defer_item_ids, include_item_ids, undo_item_ids = (
+            [i for i in (x or []) if i not in ignored] for x in (keep_item_ids, defer_item_ids, include_item_ids, undo_item_ids))
+        s.log("ITEMS_IGNORED", "system", items=ignored, why="고객 발화·기존 계획에 없는 항목")
     for k, ids in (("keep", keep_item_ids), ("defer", defer_item_ids), ("include", include_item_ids)):
         for iid in ids or []:
             if iid not in s.items:
                 return {"error": f"알 수 없는 항목 id: {iid}", "known_ids": list(s.items)}
             if iid not in s.constraints[k]:
                 s.constraints[k].append(iid)
+            if k == "include" and iid in s.constraints["exclude"]:
+                s.constraints["exclude"].remove(iid)
     for iid in undo_item_ids or []:
         for k in s.constraints:
             if iid in s.constraints[k]:
                 s.constraints[k].remove(iid)
-    steps, excluded = _build_steps(s)
+        if s.decisions.get(iid) == "excluded":
+            s.decisions.pop(iid)
+    steps, excluded, basis = _build_steps(s)
     body = {"steps": [{k: st[k] for k in ("key", "items", "action", "item_dates")} for st in steps], "constraints": s.constraints}
     h = hashlib.sha256(_canon(body).encode()).hexdigest()[:12]
     prev = s.plan
@@ -310,10 +443,15 @@ def plan_schedule(s: Session, keep_item_ids=None, defer_item_ids=None, include_i
         plan = {"version": version, "hash": h, "steps": steps, "excluded": excluded,
                 "constraints": json.loads(_canon(s.constraints)), "created": s.today.isoformat()}
         s.plans.append(plan)
+        s.log("PLAN_CREATED", "system", version=version, plan_hash=h, constraints=plan["constraints"],
+              steps=[{"key": st["key"], "action": st["action"], "item_dates": st["item_dates"]} for st in steps])
     else:
         plan = prev
     stale = [x for x in (s.approval, s.pending_approval) if x and x["plan_hash"] != h]
     approval_invalidated = bool(changed and prev and stale)
+    if approval_invalidated:
+        s.log("APPROVAL_INVALIDATED", "system", invalidated_version=stale[0]["version"],
+              invalidated_hash=stale[0]["plan_hash"], new_version=plan["version"], new_hash=h)
     already = [s.items[i]["label"] for i in (defer_item_ids or []) + (keep_item_ids or [])
                if s.item_state.get(i) in ("REQUESTED", "DONE", "PENDING", "FAILED")]
     # 승인됐던 항목은 계획이 바뀌면 다시 '계획' 상태로(재승인 필요)
@@ -350,7 +488,9 @@ def plan_schedule(s: Session, keep_item_ids=None, defer_item_ids=None, include_i
         "invalidated_version": stale[0]["version"] if approval_invalidated else None,
         "invalidated_what": ("승인" if (s.approval and s.approval in stale) else "승인 화면") if approval_invalidated else None,
         "already_requested": already,
+        "ignored_items": [{"id": i, "label": s.items[i]["label"]} for i in ignored],
         "diff": diff,
+        "basis": basis,
         "rules": ["첫 급여 전 출금은 다음 주기", "자동송금 D-2영업일 이내 변경 불가", "자동납부 처리 3영업일(가정)", "적금은 만기 후"],
     }
 
@@ -371,6 +511,9 @@ def prepare_approval(s: Session) -> dict:
     n_move = sum(len(st["items"]) for st in moves)
     sal = s.salary_date()
     s.pending_approval = {"plan_hash": p["hash"], "version": p["version"]}
+    pending = _pending_confirm(s, p["steps"])
+    s.log("APPROVAL_SCREEN_PREPARED", "system", version=p["version"], plan_hash=p["hash"],
+          confirm_on_approve=[i["id"] for i in pending])
     return {
         "plan_version": p["version"], "plan_hash": p["hash"],
         "documents": [{"name": "급여계좌 변경 신청서", "tag": "AI 초안"}, {"name": "통장사본", "tag": "시스템 발급"}],
@@ -380,66 +523,106 @@ def prepare_approval(s: Session) -> dict:
         "on_approve": ["신청서를 회사 담당자에게 전달", f"자동이체 변경 {n_move}건을 공식 절차로 신청", "승인 전에는 아무것도 실행하지 않음"],
         "approval_status": _approval_status(s),
         "needs_customer_action": "고객이 화면에서 인증하고 승인해야 함(Agent는 승인할 수 없음)",
+        "confirm_on_approve": [f"{i['label']}: {i['note']}" for i in pending],
+        "auth_boundary": {"demo": s.auth.describe, "production": "본인 인증 + 전자서명 → 승인 토큰을 계획 해시에 서명"},
     }
 
 
-def execute_plan(s: Session) -> dict:
-    """승인된 현재 계획을 공식 절차(모의)로 신청. 승인 토큰이 계획 해시와 맞지 않으면 차단."""
+def grant_approval(s: Session, plan_hash: str) -> dict:
+    """고객 승인(화면의 '인증하고 승인하기'). LLM은 이 함수를 부를 수 없다(도구 목록에 없음).
+
+    인증 어댑터가 발급한 승인 토큰을 현재 계획 해시에 묶는다. 화면의 해시가 현재 계획과 다르면 거부한다.
+    """
     p = s.plan
     if not p:
+        return {"ok": False, "reason": "승인할 계획이 없습니다"}
+    if plan_hash != p["hash"]:
+        s.log("APPROVAL_REJECTED", "system", reason="화면의 계획 해시가 현재 계획과 다름", presented_hash=plan_hash,
+              current_hash=p["hash"], current_version=p["version"])
+        return {"ok": False, "reason": "stale"}
+    token = s.auth.authenticate(session_id=s.sid, plan_hash=p["hash"], plan_version=p["version"], at=s.today.isoformat())
+    if not token:
+        s.log("AUTH_FAILED", "customer", authenticator=s.auth.name, plan_hash=p["hash"])
+        return {"ok": False, "reason": "인증 실패"}
+    s.log("AUTHENTICATED", "customer", authenticator=s.auth.name, mock=s.auth.mock, method=token.get("method"))
+    confirmed = [i["id"] for i in _pending_confirm(s, p["steps"])]
+    for iid in confirmed:  # 승인 화면에 '확인 필요'로 나열된 항목은 승인과 함께 고객 확정으로 남긴다
+        s.decisions[iid] = "confirmed"
+        s.log("ITEM_DECIDED", "customer", item=iid, decision="confirm", via="승인 화면")
+    s.approval = {"plan_hash": p["hash"], "version": p["version"], "at": s.today.isoformat(), "token": token}
+    s.log("APPROVAL_GRANTED", "customer", version=p["version"], plan_hash=p["hash"], token_id=token["id"],
+          authenticator=s.auth.name, mock=s.auth.mock)
+    for st in p["steps"]:
+        for iid in st["items"]:
+            if s.item_state.get(iid) == "PLANNED" and st["action"] in ("payroll", "move"):
+                s.set_state(iid, "APPROVED", f"고객 승인 v{p['version']}")
+    return {"ok": True, "version": p["version"], "plan_hash": p["hash"], "token_id": token["id"], "confirmed": confirmed}
+
+
+def execute_plan(s: Session) -> dict:
+    """승인된 현재 계획을 기관 어댑터로 신청. 승인 토큰이 없거나 계획 해시·세션과 맞지 않으면 차단."""
+    p = s.plan
+
+    def blocked(reason, **extra):
         s.counters["blocked"] += 1
-        return {"status": "BLOCKED", "reason": "계획 없음"}
+        s.log("EXEC_BLOCKED", "system", reason=reason, plan_hash=p["hash"] if p else None)
+        return {"status": "BLOCKED", "reason": reason, **extra}
+
+    if not p:
+        return blocked("계획 없음")
     if not s.approval:
-        s.counters["blocked"] += 1
-        return {"status": "BLOCKED", "reason": "고객 승인 없음", "plan_version": p["version"]}
+        return blocked("고객 승인 없음", plan_version=p["version"])
     if s.approval["plan_hash"] != p["hash"]:
-        s.counters["blocked"] += 1
-        return {"status": "BLOCKED", "reason": f"승인한 계획(v{s.approval['version']})과 현재 계획(v{p['version']})이 다름 → 재승인 필요"}
-    requested, skipped, scheduled = [], 0, []
+        return blocked(f"승인한 계획(v{s.approval['version']})과 현재 계획(v{p['version']})이 다름 → 재승인 필요")
+    token = s.approval.get("token")
+    if not s.auth.verify(token, session_id=s.sid, plan_hash=p["hash"]):
+        return blocked("승인 토큰 검증 실패 → 인증부터 다시 필요")
+    requested, skipped, scheduled, dup = [], 0, [], 0
+    mock = "모의" if s.adapter.simulated else "연동"
     for st in p["steps"]:
         for iid in st["items"]:
             key = f"{p['hash']}:{iid}"
             if key in s.executed:
                 skipped += 1
+                dup += 1
                 s.counters["dup_prevented"] += 1
                 continue
             if st["action"] in ("payroll", "move"):
                 if s.item_state.get(iid) != "APPROVED":
                     skipped += 1
                     continue
-                s.set_state(iid, "REQUESTED", "공식 절차 신청(모의)")
-                s.executed[key] = {"item": iid, "at": s.today.isoformat()}
+                rc = s.adapter.submit(item_id=iid, action=st["action"], idempotency_key=key, approval_token=token, on_date=s.today)
+                s.log("EXEC_REQUESTED", "system", item=iid, action=st["action"], plan_version=p["version"], plan_hash=p["hash"],
+                      idempotency_key=key, token_id=token["id"], adapter=s.adapter.name, simulated=s.adapter.simulated,
+                      receipt=rc.get("receipt"))
+                s.set_state(iid, "REQUESTED", f"공식 절차 신청({mock})")
+                s.executed[key] = {"item": iid, "at": s.today.isoformat(), "receipt": rc.get("receipt")}
                 requested.append(s.items[iid]["label"])
             elif st["action"] == "defer":
                 s.executed[key] = {"item": iid, "at": s.today.isoformat(), "scheduled": st["date"]}
+                s.log("EXEC_SCHEDULED", "system", item=iid, plan_hash=p["hash"], idempotency_key=key, scheduled=st["date"])
                 scheduled.append(f"{s.items[iid]['label']}({fmt(date.fromisoformat(st['date']))} 출금부터 예약)")
+    if dup:
+        s.log("EXEC_DUPLICATE_PREVENTED", "system", plan_hash=p["hash"], count=dup)
     return {"status": "REQUESTED", "plan_version": p["version"], "requested": requested,
-            "scheduled": scheduled, "duplicate_prevented": skipped}
-
-
-# 모의 공식 결과(대본): 날짜가 지나면 상태가 바뀐다
-EVENTS = [
-    (date(2026, 11, 19), "TEL", "DONE", "official", "공식 결과: 출금계좌 변경 완료"),
-    (date(2026, 11, 20), "INS", "DONE", "official", "공식 결과: 12월 주기부터 변경 완료"),
-    (date(2026, 11, 20), "SAL", "PENDING", "customer", "회사 처리 접수(고객 확인)"),
-    (date(2026, 11, 25), "SAL", "DONE", "observed", "거래내역: 우리WON에 첫 급여 입금"),
-    (date(2026, 11, 27), "TEL", None, "observed", "거래내역: 우리WON에서 첫 출금 정상"),
-    (date(2026, 12, 2), "MGT", "FAILED", "official", "공식 결과: 변경 불가(기관 직접 변경 필요)"),
-    (date(2026, 12, 15), "MGT", None, "observed", "거래내역: 기존 A은행에서 계속 출금"),
-    (date(2026, 12, 18), "INS", None, "observed", "거래내역: 우리WON에서 첫 출금 정상"),
-]
+            "scheduled": scheduled, "duplicate_prevented": skipped,
+            "channel": f"{s.adapter.name} · {s.adapter.describe}"}
 
 
 def advance_to(s: Session, new_today: date) -> list:
+    """시간이 지나면 기관 어댑터에서 결과를 받아 상태 머신에 반영한다(데모: 시뮬레이터의 시나리오 결과)."""
     changes = []
-    for d, iid, new, kind, why in EVENTS:
+    for ev in s.adapter.poll(until=new_today):
+        d, iid, new, kind, why = ev.date, ev.item_id, ev.new_state, ev.channel, ev.message
         key = (d, iid, why)
-        if d > new_today or key in s.fired_events or iid not in s.item_state:
+        if key in s.fired_events or iid not in s.item_state:
             continue
         if s.item_state[iid] in ("PLANNED", "KEPT", "APPROVED") and new:
             continue  # 신청하지 않은 항목에는 결과가 오지 않음
         s.fired_events.add(key)
         s.today = d
+        s.log("RESULT_RECEIVED", "institution", item=iid, channel=kind, new_state=new, message=why,
+              adapter=s.adapter.name, simulated=s.adapter.simulated)
         if new:
             try:
                 s.set_state(iid, new, why)
@@ -485,11 +668,13 @@ def set_followup(s: Session, item_id: str, option_id: str) -> dict:
     if option_id == "direct_request":
         s.set_state(item_id, "PENDING", "고객이 기관에 직접 변경 요청(고객 확인 필요)")
         s.followups[item_id] = option_id
+        s.log("FOLLOWUP_SET", "customer", item=item_id, option=option_id)
         return {"item": lab, "option": "direct_request", "documents": ["출금계좌 변경 요청서(문구 초안)", "통장사본"],
                 "request_text": f"{inst} 담당자님, {lab} 자동이체 출금계좌를 우리은행 {data.CUSTOMER['won_account']}로 변경 요청드립니다.",
                 "next_check": f"{fmt(nxt)} 출금 계좌 확인", "state": STATES["PENDING"]}
     if option_id == "keep_balance":
         s.followups[item_id] = option_id
+        s.log("FOLLOWUP_SET", "customer", item=item_id, option=option_id)
         amt = s.items[item_id]["amount"]
         remind = nxt - timedelta(days=1)
         return {"item": lab, "option": "keep_balance", "keep_amount": amt, "reminder": f"{fmt(remind)} 알림",

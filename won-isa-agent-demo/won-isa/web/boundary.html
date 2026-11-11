@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WON이사 · 데모와 운영의 경계</title>
+<style>
+  :root { --ink:#1b2433; --sub:#6b7685; --line:#dfe5ee; --blue:#2c6fd6; --demo:#a8730f; --demo-bg:#fdf0d3; --prod:#2c6fd6; --prod-bg:#e3eefc; --keep:#2f8a57; --keep-bg:#e7f4ec;
+    font-family:"Pretendard","Noto Sans KR","Malgun Gothic",sans-serif; }
+  body { margin:0; background:#f4f7fb; color:var(--ink); }
+  main { max-width:1180px; margin:0 auto; padding:30px 24px 60px; }
+  h1 { font-size:26px; margin:0 0 6px; } h2 { font-size:18px; margin:34px 0 12px; }
+  p.lead { color:var(--sub); margin:0; font-size:15px; line-height:1.6; }
+  .legend { display:flex; gap:8px; margin:16px 0 0; font-size:13px; flex-wrap:wrap; }
+  .tag { display:inline-block; border-radius:9px; padding:3px 9px; font-size:12px; font-weight:700; white-space:nowrap; }
+  .t-demo { background:var(--demo-bg); color:var(--demo); } .t-prod { background:var(--prod-bg); color:var(--prod); } .t-keep { background:var(--keep-bg); color:var(--keep); }
+  .flow { display:grid; grid-template-columns:repeat(5, 1fr); gap:26px; margin-top:8px; }
+  .node { position:relative; background:#fff; border:1.5px solid var(--line); border-radius:16px; padding:14px 14px 12px; display:flex; flex-direction:column; }
+  .node:not(:last-child)::after { content:"→"; position:absolute; right:-22px; top:50%; transform:translateY(-50%); color:#9aa5b4; font-size:18px; font-weight:700; }
+  .node h3 { margin:0 0 3px; font-size:15.5px; } .node .who { font-size:12px; color:var(--sub); margin-bottom:10px; }
+  .slot { border-radius:10px; padding:8px 10px; font-size:12.5px; line-height:1.5; margin-top:6px; }
+  .slot b { display:block; font-size:11.5px; margin-bottom:2px; }
+  .slot.demo { background:var(--demo-bg); color:#6b5310; } .slot.demo b { color:var(--demo); }
+  .slot.prod { background:var(--prod-bg); color:#274a80; } .slot.prod b { color:var(--prod); }
+  .slot.keep { background:var(--keep-bg); color:#27583c; } .slot.keep b { color:var(--keep); }
+  .node.core { border-color:#9ccdb1; }
+  .llm { margin-top:18px; background:#fff; border:1.5px dashed #b8c4d6; border-radius:16px; padding:12px 16px; font-size:13.5px; color:#4c5666; line-height:1.6; }
+  .llm b { color:var(--ink); }
+  table { width:100%; border-collapse:collapse; background:#fff; border-radius:14px; overflow:hidden; font-size:13.5px; }
+  th { text-align:left; background:#eef2f7; color:#4c5666; font-weight:600; padding:10px 12px; }
+  td { padding:10px 12px; border-top:1px solid var(--line); vertical-align:top; line-height:1.55; }
+  td:first-child { font-weight:700; white-space:nowrap; } td code { font-size:12px; color:#4c5666; background:#f1f3f6; border-radius:6px; padding:1px 6px; }
+  .cols { display:grid; grid-template-columns:1fr 1fr; gap:18px; }
+  .box { background:#fff; border-radius:14px; padding:16px 18px; font-size:13.5px; line-height:1.7; }
+  .box h3 { margin:0 0 6px; font-size:15px; } .box ul { margin:0; padding-left:18px; }
+  pre { background:#0f1b2e; color:#dbe5f5; border-radius:12px; padding:14px 16px; font-size:12.5px; line-height:1.6; overflow:auto; margin:8px 0 0; }
+</style>
+</head>
+<body>
+<main>
+  <h1>데모와 운영의 경계</h1>
+  <p class="lead">이 데모에서 무엇이 모의이고, 운영으로 갈 때 어느 자리에 무엇이 연결되는지 정리한 그림입니다.
+    통제 로직(승인 게이트·계획 해시·멱등키·상태 머신·숫자 검증·감사 로그 형식)은 그대로 두고, 바깥과 맞닿는 자리(인증·세션·기관 연동·저장소)만 바꿉니다.</p>
+  <div class="legend">
+    <span class="tag t-demo">데모</span> 지금 코드에서 모의로 채운 부분
+    <span class="tag t-prod">운영</span> 운영 전환 때 연결할 것(미구현)
+    <span class="tag t-keep">그대로</span> 데모와 운영이 같은 코드
+  </div>
+
+  <h2>승인에서 실행·기록까지</h2>
+  <div class="flow">
+    <div class="node">
+      <h3>① 고객 인증</h3><div class="who">고객 · 화면에서 직접</div>
+      <div class="slot demo"><b>데모 · MockAuthenticator</b>'인증하고 승인하기' 버튼만 확인. 본인 확인 없음</div>
+      <div class="slot prod"><b>운영 · 인증 어댑터 교체</b>로그인 세션의 본인 인증(생체·인증서) + 계획 해시 전자서명</div>
+    </div>
+    <div class="node core">
+      <h3>② 승인 토큰</h3><div class="who">시스템</div>
+      <div class="slot keep"><b>그대로</b>토큰을 세션과 계획 해시에 묶음. 계획이 바뀌면 해시가 달라져 기존 승인은 무효</div>
+      <div class="slot demo"><b>데모</b>세션 = 브라우저 쿠키, 서버 메모리 보관</div>
+      <div class="slot prod"><b>운영</b>세션 = 로그인 고객, 저장소·만료·폐기 관리</div>
+    </div>
+    <div class="node core">
+      <h3>③ 실행 게이트</h3><div class="who">시스템 · LLM은 통과 판단을 하지 않음</div>
+      <div class="slot keep"><b>그대로</b>토큰 검증(발급자·세션·해시) → 통과할 때만 신청. 같은 계획·같은 항목은 한 번만(멱등키)</div>
+    </div>
+    <div class="node">
+      <h3>④ 기관 연동</h3><div class="who">InstitutionAdapter · submit / poll</div>
+      <div class="slot demo"><b>데모 · DemoSimulator</b>접수는 메모리에만, 결과는 사전에 정한 시나리오(관리비 변경 실패 포함)</div>
+      <div class="slot prod"><b>운영 · 기관별 어댑터</b>계좌이동서비스 공식 절차, 기관 직접 변경, 회사 급여 담당 전달</div>
+    </div>
+    <div class="node core">
+      <h3>⑤ 감사 이벤트 로그</h3><div class="who">시스템 · 추가만 가능</div>
+      <div class="slot keep"><b>그대로</b>계획 버전·해시, 승인, 차단, 실행 요청, 결과 수신, 후속 조치를 해시 체인으로 기록</div>
+      <div class="slot demo"><b>데모</b>메모리 + JSONL 파일</div>
+      <div class="slot prod"><b>운영</b>변경 불가 저장소·감사 DB, 보존 기간·접근 통제</div>
+    </div>
+  </div>
+  <div class="llm"><b>LLM의 자리</b> · LLM은 ①~⑤ 어디에도 없습니다. 도구를 고르고 결과를 설명하며, 모호하면 되묻습니다.
+    승인은 고객이 화면에서, 실행은 시스템이 승인 토큰으로 합니다. LLM이 실행 도구를 부르더라도 ③ 게이트가 토큰을 검증하므로 승인 없이는 차단됩니다.</div>
+
+  <h2>항목별 경계</h2>
+  <table>
+    <thead><tr><th>구분</th><th>데모(현재 코드)</th><th>운영 전환 때 연결할 것</th><th>코드 위치</th></tr></thead>
+    <tbody>
+      <tr><td>본인 인증</td><td>모의 인증. 버튼을 누르면 성공으로 봄</td><td>은행 앱 본인 인증 + 전자서명. 같은 <code>authenticate / verify</code> 인터페이스</td><td><code>server/auth.py</code></td></tr>
+      <tr><td>사용자 세션</td><td>브라우저 쿠키별 세션, 서버 메모리(최대 50개, 재시작하면 사라짐). 로그인 없음</td><td>로그인 세션·고객 식별자 기준 저장소, 다중 서버, 동시성 제어</td><td><code>server/app.py</code></td></tr>
+      <tr><td>거래 데이터</td><td>가상 고객 김우리의 6개월 거래 412건</td><td>마이데이터 전송 요구로 받은 거래내역(동의 범위)</td><td><code>server/data.py</code></td></tr>
+      <tr><td>기관 결과</td><td>시뮬레이터의 사전 정의 시나리오</td><td>기관별 어댑터가 돌려주는 실제 접수·결과</td><td><code>server/adapters.py</code></td></tr>
+      <tr><td>일정 규칙</td><td>자동송금 D-2영업일(출처 있음), 자동납부 처리 3영업일(가정)</td><td>기관별 실제 처리 기간·마감 시각으로 교체</td><td><code>server/rules.py</code></td></tr>
+      <tr><td>감사 로그</td><td>해시 체인 JSONL. 변조하면 검증이 깨짐</td><td>변경 불가 저장소, 시각 인증, 보존·열람 정책</td><td><code>server/audit.py</code></td></tr>
+      <tr><td>LLM</td><td>대본 모드 또는 OpenAI 호환 API(로컬 Ollama 포함)</td><td>내부망 모델. 개인신용정보는 외부 API로 보내지 않음</td><td><code>server/agent.py</code></td></tr>
+    </tbody>
+  </table>
+
+  <h2>어댑터 인터페이스</h2>
+  <div class="cols">
+    <div class="box">
+      <h3>기관 연동 · InstitutionAdapter</h3>
+      Agent와 도구는 이 두 함수만 압니다. 시뮬레이터를 실제 어댑터로 바꿔도 계획·승인·실패 대응 흐름은 그대로입니다.
+<pre>submit(item_id, action, idempotency_key,
+       approval_token, on_date) -> 접수증
+poll(until) -> [ResultEvent(date, item_id,
+       new_state, channel, message)]</pre>
+    </div>
+    <div class="box">
+      <h3>인증 · Authenticator</h3>
+      승인 API는 계획 해시만 비교하지 않고, 인증 어댑터가 발급한 토큰을 실행 직전에 다시 검증합니다.
+<pre>authenticate(session_id, plan_hash,
+       plan_version, at) -> 승인 토큰 | None
+verify(token, session_id, plan_hash) -> bool</pre>
+    </div>
+  </div>
+
+  <h2>데모가 보여 주는 것과 보여 주지 않는 것</h2>
+  <div class="cols">
+    <div class="box"><h3>보여 주는 것</h3><ul>
+      <li>승인 없이는 실행되지 않고, 계획이 바뀌면 다시 승인해야 한다</li>
+      <li>숫자는 시스템이 계산하고 LLM 답변 속 숫자는 도구 결과와 대조한다</li>
+      <li>기관 결과가 실패로 돌아와도 상태 머신과 대안 제시가 동작한다</li>
+      <li>모든 단계가 감사 로그에 남고, 로그만으로 '승인 없는 실행 0건'을 확인할 수 있다</li></ul></div>
+    <div class="box"><h3>보여 주지 않는 것</h3><ul>
+      <li>실제 본인 인증, 실제 기관 통신, 실제 고객 데이터</li>
+      <li>다중 서버·장애 복구·동시 요청 처리</li>
+      <li>기관별 실제 처리 기간(자동납부 3영업일은 가정)</li>
+      <li>실제 거래 데이터에서의 탐지 정확도(평가는 가상 고객 기준)</li></ul></div>
+  </div>
+</main>
+</body>
+</html>

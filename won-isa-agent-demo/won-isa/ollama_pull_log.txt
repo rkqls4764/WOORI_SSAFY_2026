@@ -1,0 +1,10 @@
+[?2026h[?25l[1Gpulling manifest ⠋ [K[?25h[?2026l[?2026h[?25l[1Gpulling manifest ⠙ [K[?25h[?2026l[?2026h[?25l[1Gpulling manifest ⠹ [K[?25h[?2026l[?2026h[?25l[1Gpulling manifest ⠸ [K[?25h[?2026l[?2026h[?25l[1Gpulling manifest ⠼ [K[?25h[?2026l[?2026h[?25l[1Gpulling manifest ⠴ [K[?25h[?2026l[?2026h[?25l[1Gpulling manifest ⠦ [K[?25h[?2026l[?2026h[?25l[1Gpulling manifest ⠧ [K[?25h[?2026l[?2026h[?25l[1Gpulling manifest ⠇ [K[?25h[?2026l[?2026h[?25l[1Gpulling manifest ⠏ [K[?25h[?2026l[?2026h[?25l[1Gpulling manifest ⠋ [K[?25h[?2026l[?2026h[?25l[1Gpulling manifest ⠙ [K[?25h[?2026l[?2026h[?25l[1Gpulling manifest ⠹ [K[?25h[?2026l[?2026h[?25l[1Gpulling manifest ⠸ [K[?25h[?2026l[?2026h[?25l[1Gpulling manifest ⠼ [K[?25h[?2026l[?2026h[?25l[1Gpulling manifest [K
+pulling a3de86cd1c13: 100% ▕██████████████████▏ 5.2 GB                         [K
+pulling ae370d884f10: 100% ▕██████████████████▏ 1.7 KB                         [K
+pulling d18a5cc71b84: 100% ▕██████████████████▏  11 KB                         [K
+pulling cff3f395ef37: 100% ▕██████████████████▏  120 B                         [K
+pulling 05a61d37b084: 100% ▕██████████████████▏  487 B                         [K
+verifying sha256 digest [K
+writing manifest [K
+removing unused layers [K
+success [K[?25h[?2026l

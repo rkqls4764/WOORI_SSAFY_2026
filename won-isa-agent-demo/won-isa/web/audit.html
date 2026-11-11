@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WON이사 · 감사 이벤트 로그</title>
+<style>
+  :root { --ink:#1b2433; --sub:#6b7685; --line:#e6eaf0; --blue:#2c6fd6; font-family:"Pretendard","Noto Sans KR","Malgun Gothic",sans-serif; }
+  body { margin:0; background:#f4f7fb; color:var(--ink); }
+  main { max-width:1100px; margin:0 auto; padding:28px 24px 60px; }
+  h1 { font-size:24px; margin:0 0 6px; } p.lead { color:var(--sub); margin:0 0 18px; font-size:14.5px; line-height:1.6; }
+  .bar { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:14px; }
+  .chip { background:#fff; border:1px solid var(--line); border-radius:10px; padding:7px 12px; font-size:13.5px; }
+  .ok { background:#e7f4ec; color:#2f8a57; border-color:#cfe8d9; font-weight:700; } .bad { background:#fde4dc; color:#d4542b; border-color:#f3c2b4; font-weight:700; }
+  button { font:inherit; font-size:13.5px; border:1px solid #cdd5e1; background:#fff; border-radius:10px; padding:7px 12px; cursor:pointer; }
+  button:hover { border-color:var(--blue); color:var(--blue); }
+  table { width:100%; border-collapse:collapse; background:#fff; border-radius:14px; overflow:hidden; font-size:13px; }
+  th { text-align:left; background:#eef2f7; color:#4c5666; font-weight:600; padding:9px 10px; white-space:nowrap; }
+  td { padding:8px 10px; border-top:1px solid var(--line); vertical-align:top; }
+  td.mono, .mono { font-family:ui-monospace,Menlo,Consolas,monospace; font-size:12px; color:#4c5666; }
+  td.pl { overflow-wrap:anywhere; color:#3a4658; }
+  .a { display:inline-block; border-radius:9px; padding:2px 8px; font-size:11.5px; font-weight:700; white-space:nowrap; }
+  .a-customer { background:#fdf0d3; color:#a8730f; } .a-llm { background:#e3eefc; color:#2c6fd6; }
+  .a-system { background:#e7f4ec; color:#2f8a57; } .a-institution { background:#ece7fb; color:#5b45b0; }
+  tr.key td { background:#fbfcff; } tr.key td.t { font-weight:700; }
+  tr.broken td { background:#fff1ed; }
+  .note { margin-top:16px; font-size:13px; color:var(--sub); line-height:1.7; }
+</style>
+</head>
+<body>
+<main>
+  <h1>감사 이벤트 로그</h1>
+  <p class="lead">계획 버전·해시, 인증·승인, 실행 차단, 실행 요청, 결과 수신, 후속 조치가 일어난 순서대로 쌓입니다. 추가만 할 수 있고,
+    이벤트마다 앞 이벤트의 해시를 품고 있어 중간을 고치거나 빼면 검증이 깨집니다. 지금 이 브라우저 세션의 로그입니다.</p>
+  <div class="bar">
+    <span class="chip" id="case">–</span>
+    <span class="chip" id="verify">검증 중</span>
+    <span class="chip" id="unauth">–</span>
+    <span class="chip" id="file">–</span>
+    <button id="reload">새로고침</button>
+    <button id="tamper">변조 시험(화면에서만)</button>
+  </div>
+  <table>
+    <thead><tr><th>#</th><th>기록 시각</th><th>데모 기준일</th><th>주체</th><th>이벤트</th><th>내용</th><th>해시</th><th>앞 해시</th></tr></thead>
+    <tbody id="rows"></tbody>
+  </table>
+  <p class="note">
+    주체: <span class="a a-customer">고객</span> 화면에서 직접 한 조작 · <span class="a a-llm">LLM</span> 모델이 고른 도구 호출 ·
+    <span class="a a-system">시스템</span> 규칙·게이트·상태 전이 · <span class="a a-institution">기관</span> 기관 어댑터가 돌려준 결과(데모: 시뮬레이터)<br>
+    '승인 없는 실행'은 서버의 카운터가 아니라 이 로그만 읽어서 셉니다(같은 계획 해시의 승인 이벤트가 앞에 없는 실행 요청 수).<br>
+    데모는 서버 메모리와 JSONL 파일에 남깁니다. 운영에서는 같은 이벤트 형식을 변경 불가 저장소와 감사 DB로 보내는 자리입니다(server/audit.py).
+  </p>
+</main>
+<script>
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const ACTOR = { customer: "고객", llm: "LLM", system: "시스템", institution: "기관" };
+const KEY = new Set(["PLAN_CREATED", "APPROVAL_GRANTED", "APPROVAL_REJECTED", "APPROVAL_INVALIDATED", "EXEC_BLOCKED", "EXEC_REQUESTED", "RESULT_RECEIVED", "FOLLOWUP_SET", "ITEM_DECIDED", "AUTHENTICATED"]);
+const FIELDS = ["seq", "case_id", "ts", "sim_date", "actor", "type", "payload", "prev"];
+let events = [];
+// 서버(server/audit.py)와 같은 방식으로 정렬된 JSON을 만들어 SHA-256을 다시 계산한다
+function canon(o) {
+  if (o === null || typeof o !== "object") return JSON.stringify(o);
+  if (Array.isArray(o)) return "[" + o.map(canon).join(",") + "]";
+  return "{" + Object.keys(o).sort().map((k) => JSON.stringify(k) + ":" + canon(o[k])).join(",") + "}";
+}
+async function sha(text) {
+  const b = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+  return [...new Uint8Array(b)].map((x) => x.toString(16).padStart(2, "0")).join("");
+}
+async function verifyLocal(evs) {
+  let prev = "0".repeat(64);
+  for (let i = 0; i < evs.length; i++) {
+    const body = {}; FIELDS.forEach((k) => body[k] = evs[i][k]);
+    if (evs[i].seq !== i + 1 || evs[i].prev !== prev || evs[i].hash !== await sha(canon(body))) return i + 1;
+    prev = evs[i].hash;
+  }
+  return null;
+}
+async function render(note) {
+  const broken = window.crypto?.subtle ? await verifyLocal(events) : null;
+  const v = document.getElementById("verify");
+  v.className = "chip " + (broken ? "bad" : "ok");
+  v.textContent = broken ? `체인 검증 실패 · ${broken}번 이벤트에서 끊김${note || ""}` : `체인 검증 통과 · ${events.length}건 (브라우저에서 해시 재계산)`;
+  document.getElementById("rows").innerHTML = events.map((e) => `<tr class="${KEY.has(e.type) ? "key" : ""} ${broken && e.seq >= broken ? "broken" : ""}">
+    <td class="mono">${e.seq}</td><td class="mono">${esc(e.ts.slice(11, 23))}</td><td class="mono">${esc(e.sim_date)}</td>
+    <td><span class="a a-${e.actor}">${ACTOR[e.actor] || e.actor}</span></td><td class="t mono">${esc(e.type)}</td>
+    <td class="pl">${esc(Object.entries(e.payload).map(([k, x]) => `${k}=${typeof x === "object" ? JSON.stringify(x) : x}`).join(" · "))}</td>
+    <td class="mono">${e.hash.slice(0, 10)}</td><td class="mono">${e.prev.slice(0, 10)}</td></tr>`).join("");
+}
+async function load() {
+  const r = await (await fetch("/api/audit")).json();
+  events = r.events;
+  document.getElementById("case").textContent = `건 ${r.case_id}`;
+  const u = document.getElementById("unauth");
+  u.className = "chip " + (r.exec_without_approval ? "bad" : "ok");
+  u.textContent = `승인 없는 실행 ${r.exec_without_approval}건 (로그 기준)`;
+  document.getElementById("file").textContent = r.file ? `파일 ${r.file}` : "메모리에만 보관";
+  render();
+}
+document.getElementById("reload").onclick = load;
+document.getElementById("tamper").onclick = () => {
+  const i = events.findIndex((e) => e.type === "APPROVAL_GRANTED");
+  const k = i >= 0 ? i : Math.floor(events.length / 2);
+  if (!events[k]) return;
+  events[k].payload = { ...events[k].payload, plan_hash: "tampered" };
+  render(" · 화면에서 내용을 바꿔 본 결과(서버 로그는 그대로)");
+};
+load();
+</script>
+</body>
+</html>

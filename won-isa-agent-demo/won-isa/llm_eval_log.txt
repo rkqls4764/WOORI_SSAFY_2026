@@ -1,0 +1,16 @@
+==== WON-ISA LLM eval 2026-11-11 15:32:03.10 ==== 
+name, memory.used [MiB], memory.total [MiB]
+NVIDIA GeForce RTX 5060 Ti, 14 MiB, 16311 MiB
+Smoke test... 
+mode: openai | model: qwen3:8b
+tools: ['get_transactions(months=6)', 'detect_recurring()', 'calc_switch_quote()']
+cards: ['items', 'quote'] | guard_ok: True | tokens: {'prompt': 10165, 'completion': 905} | sec: 18.5
+reply: 우리WON으로 이사하면 연간 약 6만 원의 추가 이자가 예상됩니다. 다만, A은행 기존 혜택 상실과 해지 손실 여부 등 확인이 필요한 사항이 있어요. 이사 계획으로 진행하시겠어요?
+SMOKE_OK
+NAME        ID              SIZE      PROCESSOR    CONTEXT    RUNNER      UNTIL              
+qwen3:8b    500a1f067a9f    6.4 GB    100% GPU     16384      llamacpp    4 minutes from now    
+GPU OK 
+Evaluation... 
+NAME        ID              SIZE      PROCESSOR    CONTEXT    RUNNER      UNTIL              
+qwen3:8b    500a1f067a9f    6.4 GB    100% GPU     16384      llamacpp    4 minutes from now    
+==== DONE 2026-11-11 15:47:59.15 ==== 

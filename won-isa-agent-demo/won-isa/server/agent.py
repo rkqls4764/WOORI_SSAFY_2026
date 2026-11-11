@@ -17,6 +17,8 @@ from .prompts import SYSTEM_PROMPT
 from .rules import fmt
 
 MAX_STEPS = 8
+# 계획이 바뀐 것처럼 말하는 표현(계획 변경이 막힌 턴에서만 검사)
+CLAIM_RE = r"(옮길게요|옮겼어요|미뤘어요|미룰게요|미루고|반영했어요|반영할게요|이전할게요|포함할게요|변경했어요|조정했어요|조정할게요)"
 
 
 # ---------------------------------------------------------------- LLM 백엔드
@@ -35,8 +37,14 @@ class OpenAICompatLLM:
 
     def __init__(self):
         from openai import OpenAI
-        self.client = OpenAI(base_url=os.getenv("LLM_BASE_URL") or None, api_key=os.getenv("LLM_API_KEY"))
+        # 제한 시간: 기본값(600초 × 재시도 2회)이면 모델이 멈출 때 데모·평가가 30분 넘게 묶인다
+        self.timeout = float(os.getenv("LLM_TIMEOUT") or 120)
+        self.client = OpenAI(base_url=os.getenv("LLM_BASE_URL") or None, api_key=os.getenv("LLM_API_KEY"),
+                             timeout=self.timeout, max_retries=int(os.getenv("LLM_MAX_RETRIES") or 1))
         self.model = os.getenv("LLM_MODEL")
+        self.base_url = os.getenv("LLM_BASE_URL") or "(OpenAI 기본)"
+        seed = os.getenv("LLM_SEED", "7")  # 재현용 고정 시드. 서버가 seed를 지원하지 않으면 .env에서 LLM_SEED= 로 비움
+        self.seed = int(seed) if seed.strip().lstrip("-").isdigit() else None
         if not self.model:
             raise ValueError("LLM_MODEL을 .env에 설정하세요(팀이 쓰는 tool calling 지원 모델 이름)")
 
@@ -46,6 +54,8 @@ class OpenAICompatLLM:
             clean.append({k: m[k] for k in ("role", "tool_call_id", "content")} if m["role"] == "tool" else m)
         # tool_choice는 보내지 않음(기본값이 auto이고, Ollama 등 일부 서버는 지원하지 않음)
         kw = {"tools": tools} if tools else {}
+        if self.seed is not None:
+            kw["seed"] = self.seed
         r = self.client.chat.completions.create(model=self.model, messages=clean, temperature=0, **kw)
         m = r.choices[0].message
         calls = []
@@ -105,6 +115,11 @@ class ScriptedLLM:
                 if r.get("status") == "BLOCKED":
                     return self._say(f"승인 내용과 현재 계획이 맞지 않아 실행하지 않았어요. {r['reason']}.")
                 return self._say(f"승인하신 계획 v{r['plan_version']}대로 공식 절차에 신청했어요.\n\n결과가 오면 근거와 함께 알려 드릴게요.")
+            if "항목 결정" in u:
+                r = done.get("plan_schedule", {})
+                if r.get("reapproval_required"):
+                    return self._say("말씀하신 대로 계획을 다시 짰어요.\n계획이 바뀌어서 다시 승인해 주셔야 해요.")
+                return self._say("말씀하신 대로 계획을 다시 짰어요.\n바뀐 부분을 확인해 주세요.")
             if "정착" in u:
                 if not had("get_settlement_status"):
                     return self._call("get_settlement_status")
@@ -168,6 +183,10 @@ class ScriptedLLM:
             if iid and not had("plan_schedule"):
                 self.expect_diff = True
                 return self._call("plan_schedule", keep_item_ids=keep, defer_item_ids=[iid])
+
+        # --- 항목 제외 요청: 제외는 고객이 화면에서 직접(LLM 경로 밖)
+        if any(k in u for k in ("빼줘", "빼 줘", "제외")) and not any(k in u for k in ("실행", "해지", "무시")):
+            return self._say("이사에서 뺄 항목은 '탐지 항목 확인'에서 직접 '제외'를 눌러 주세요.\n누르시면 계획을 다시 짜 드릴게요.")
 
         # --- 실행 요청(승인 게이트 시험)
         if any(k in u for k in ("바로", "실행", "다 옮겨", "해지", "무시")):
@@ -241,7 +260,7 @@ def _summary(name, args, r) -> list[dict]:
     if name == "get_transactions":
         return [head | {"sub": f"동의 범위 거래 {r['count']}건 · {r['months']}개월 · 원문 적요 미전달"}]
     if name == "detect_recurring":
-        out = [head | {"sub": f"반복 패턴 {r['patterns_found']}건 → 이전 후보 {r['move_candidates']}건"}]
+        out = [head | {"sub": f"반복 패턴 {r['patterns_found']}건 → 이전 후보 {r['move_candidates']}건 · 규칙: {r['rule']}"}]
         out += [{"kind": "observe", "title": o.split(":")[0], "sub": o.split(": ", 1)[1]} for o in r["observations"]]
         return out
     if name == "calc_switch_quote":
@@ -256,6 +275,9 @@ def _summary(name, args, r) -> list[dict]:
         out = [head | {"sub": f"계획 v{r['version']} · 단계 {len(r['steps'])}개 · 해시 {r['plan_hash'][:6]}" + ("" if r["changed"] else " (변경 없음)")}]
         if r["reapproval_required"]:
             out.append({"kind": "block", "title": f"v{r['invalidated_version']} {r['invalidated_what']} 무효", "sub": "계획 버전이 바뀜 → 이전 버전으로는 승인·실행 불가, 재승인 필요"})
+        if r.get("ignored_items"):
+            labs = ", ".join(i["label"] for i in r["ignored_items"])
+            out.append({"kind": "block", "title": "항목 근거 가드", "sub": f"고객이 말하지 않은 항목({labs})은 계획에서 뺌 · 말한 항목만 반영"})
         if r.get("already_requested"):
             out.append({"kind": "observe", "title": "이미 신청된 항목", "sub": ", ".join(r["already_requested"]) + " → 변경 신청 필요"})
         return out
@@ -264,7 +286,8 @@ def _summary(name, args, r) -> list[dict]:
     if name == "execute_plan":
         if r["status"] == "BLOCKED":
             return [head | {"sub": "실행 요청"}, {"kind": "block", "title": "실행 차단", "sub": r["reason"]}]
-        return [head | {"sub": f"신청 {len(r['requested'])}건 · 예약 {len(r['scheduled'])}건 · 중복 방지 {r['duplicate_prevented']}건"}]
+        return [head | {"sub": f"신청 {len(r['requested'])}건 · 예약 {len(r['scheduled'])}건 · 중복 방지 {r['duplicate_prevented']}건"},
+                {"kind": "event", "title": "기관 연동 어댑터", "sub": f"{r['channel']} · 운영에서는 같은 인터페이스로 기관별 어댑터 연결"}]
     if name == "get_move_status":
         return [head | {"sub": f"{r['as_of']} 기준 항목 {len(r['items'])}개 · 실패 {len(r['alerts'])}건"}]
     if name == "set_followup":
@@ -279,6 +302,8 @@ def _cards(name, r, s: T.Session) -> list[dict]:
         return [{"type": "choices", "options": [m["label"] + "요" for m in r["matches"]]}]
     if "error" in r:
         return []
+    if name == "detect_recurring":
+        return [T.items_card(s)]
     if name == "calc_switch_quote":
         return [{"type": "quote", **r}]
     if name == "plan_schedule":
@@ -300,7 +325,7 @@ def _cards(name, r, s: T.Session) -> list[dict]:
     return []
 
 
-SCENE = {"quote": "K2 견적", "plan": "K3 순서별 계획", "plan_diff": "K4 재계획", "choices": "K4 재계획",
+SCENE = {"items": "K2 견적", "quote": "K2 견적", "plan": "K3 순서별 계획", "plan_diff": "K4 재계획", "choices": "K4 재계획",
          "approval": "K5 승인 게이트", "exec": "K5 승인 게이트", "failure": "K6 실패 감지", "followup": "K6 실패 감지",
          "settle": "K7 정착 현황", "status": "K6 상태 추적"}
 SUBTITLE = {"plan_diff": "계획 수정 중", "choices": "계획 수정 중", "approval": "고객 승인 대기", "exec": "공식 절차 진행 중",
@@ -335,11 +360,14 @@ class Agent:
         if not text.startswith("[시스템 이벤트]"):
             self.session.last_user = text
         self.history.append({"role": "user", "content": text})
+        is_event = text.startswith("[시스템 이벤트]")
+        self.session.log("SYSTEM_EVENT" if is_event else "CUSTOMER_MESSAGE", "system" if is_event else "customer", text=text[:200])
         self.allowed |= guard.extract(text)
         log, cards, n_tools, usage = [], [], 0, {"prompt": 0, "completion": 0}
         n_sys = 0
         if forced:
             name, args = forced
+            self.session.log("TOOL_CALLED", "system", tool=name, args=args, trigger="고객 화면 조작(LLM 경로 밖)")
             r = T.TOOL_IMPLS[name](self.session, **args)
             n_sys += 1
             self.allowed |= guard.allowed_from(r)
@@ -353,9 +381,18 @@ class Agent:
                                                  "function": {"name": name, "arguments": json.dumps(args, ensure_ascii=False)}}]})
             self.history.append({"role": "tool", "tool_call_id": cid, "name": name,
                                  "content": json.dumps(r, ensure_ascii=False, default=str)})
-        final = None
+        final, llm_error = None, None
+        blocked_change, plan_changed = None, False  # 이번 턴에 계획 변경이 막혔는지 / 실제로 바뀌었는지
         for _ in range(MAX_STEPS):
-            out = self.llm.chat([self._system()] + self.history, T.TOOL_SCHEMAS if allow_tools else [])
+            try:
+                out = self.llm.chat([self._system()] + self.history, T.TOOL_SCHEMAS if allow_tools else [])
+            except Exception as e:  # 타임아웃·연결 끊김: 화면·평가가 멈추지 않게 실패로 기록하고 이번 요청은 끝낸다
+                llm_error = f"{type(e).__name__}: {str(e)[:160]}"
+                self.totals["llm_error"] = self.totals.get("llm_error", 0) + 1
+                self.session.log("LLM_ERROR", "system", error=llm_error)
+                log.append({"kind": "check", "title": "LLM 응답 실패", "sub": f"{type(e).__name__} · 이번 요청은 실행하지 않음", "fail": True})
+                final = "모델 응답이 제한 시간 안에 오지 않아 이번 요청은 처리하지 않았어요. 다시 말씀해 주세요."
+                break
             usage["prompt"] += out["usage"]["prompt"]
             usage["completion"] += out["usage"]["completion"]
             if not out["tool_calls"]:
@@ -368,6 +405,7 @@ class Agent:
             for c in out["tool_calls"]:
                 n_tools += 1
                 fn = T.TOOL_IMPLS.get(c["name"])
+                self.session.log("TOOL_CALLED", "llm", tool=c["name"], args=c["arguments"])
                 try:
                     r = fn(self.session, **c["arguments"]) if fn else {"error": f"없는 도구: {c['name']}"}
                 except T.TransitionError as e:
@@ -375,6 +413,12 @@ class Agent:
                 except TypeError as e:
                     r = {"error": f"잘못된 인자: {e}"}
                 self.allowed |= guard.allowed_from(r)
+                if c["name"] == "plan_schedule":
+                    if r.get("ambiguous") and "error" in r:
+                        labs = ", ".join(m["label"] for m in r["matches"])
+                        blocked_change = f"아직 계획은 바꾸지 않았어요. {labs} 중 어느 것인지 말씀해 주세요."
+                    elif "error" not in r and r.get("changed"):
+                        plan_changed = True
                 log += _summary(c["name"], c["arguments"], r)
                 cards += _cards(c["name"], r, self.session)
                 self.history.append({"role": "tool", "tool_call_id": c["id"], "name": c["name"],
@@ -382,9 +426,17 @@ class Agent:
         if final is None:
             final = "처리 단계가 너무 길어 여기서 멈췄어요. 다시 말씀해 주세요."
         final = re.sub(r"^\s*\[시스템 이벤트\][\s:]*", "", final)
+        if re.search(r"[\u4e00-\u9fff]", final):  # Qwen이 가끔 섞는 중국어 낱말 제거
+            final = re.sub(r"\s*[\u4e00-\u9fff]+\s*", " ", final).strip()
+            log.append({"kind": "check", "title": "답변 정리", "sub": "한국어가 아닌 낱말 제거"})
+        if blocked_change and not plan_changed and re.search(CLAIM_RE, final):
+            self.session.log("CLAIM_CORRECTED", "system", reply=final[:200], why="계획 변경이 막혔는데 바꾼 것처럼 답함")
+            log.append({"kind": "check", "title": "행동 주장 검증 실패", "sub": "계획이 바뀌지 않았는데 바꾼 것처럼 답함 → 되묻는 문장으로 대체", "fail": True})
+            final = blocked_change
         bad = guard.check(final, self.allowed)
         if bad:
             self.totals["guard_fail"] += 1
+            self.session.log("NUMBER_GUARD_FAILED", "system", unverified=[str(b) for b in bad], action="템플릿 문장으로 대체")
             log.append({"kind": "check", "title": "숫자 검증 실패", "sub": f"도구 결과에 없는 숫자 {len(bad)}개 → 템플릿 문장으로 대체", "fail": True})
             final = "결과를 카드로 정리했어요. 숫자는 카드의 시스템 계산 값을 확인해 주세요." if cards else "확인한 내용을 정리하지 못했어요. 다시 말씀해 주세요."
         elif re.search(r"\d", final):
@@ -402,4 +454,4 @@ class Agent:
             self.subtitle = SUBTITLE.get(last, "이사 진행 중")
         paras = [p for p in final.split("\n\n") if p.strip()]
         return {"before": paras[:1], "after": paras[1:], "cards": cards, "tool_count": n_tools + n_sys, "log": log,
-                "usage": usage, "latency": round(dt, 2), "guard_ok": not bad}
+                "usage": usage, "latency": round(dt, 2), "guard_ok": not bad, "llm_error": llm_error}

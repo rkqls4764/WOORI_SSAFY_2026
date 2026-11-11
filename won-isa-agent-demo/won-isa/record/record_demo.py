@@ -19,6 +19,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import sys
 import time
 from pathlib import Path
 
@@ -105,7 +106,7 @@ async def run(url: str, out: Path, check: bool, pace: float = 1.0):
         await page.wait_for_function("window.__rec !== undefined")
         await page.evaluate("fetch('/api/reset', {method: 'POST'})")
         await page.wait_for_timeout(600)
-        state = await page.evaluate("fetch('/api/state').then(r => r.json())")
+        state = await asyncio.wait_for(page.evaluate("fetch('/api/state').then(r => r.json())"), 60)
         mode = "대본 모드 · API 키 없이 같은 도구·승인·검증 경로" if state["mode"] == "scripted" else f"LLM 모드 · {state.get('model') or ''}"
         cdp = await ctx.new_cdp_session(page)
         rec = Recorder(page, cdp)
@@ -128,15 +129,17 @@ async def run(url: str, out: Path, check: bool, pace: float = 1.0):
                 if calm >= 3:
                     return
                 await page.wait_for_timeout(120)
+            print(f"  경고: {timeout}초 동안 응답이 끝나지 않음(모델·서버 확인 필요) → 다음 장면으로 넘어감", flush=True)
 
         async def caption(num, title, sub=""):
+            print(f"  [{time.strftime('%H:%M:%S')}] {num} {title}", flush=True)
             await page.evaluate("([h]) => window.__rec.caption(h)", [f"<em>{num}</em>{title}" + (f"<small>{sub}</small>" if sub else "")])
 
         async def tap(locator):
             try:
                 await locator.wait_for(state="visible", timeout=20000)
             except Exception:
-                print("  경고: 누를 버튼이 화면에 없음(LLM이 예상과 다른 응답을 함) → 이 동작은 건너뜀")
+                print("  경고: 누를 버튼이 화면에 없음(LLM이 예상과 다른 응답을 함) → 이 동작은 건너뜀", flush=True)
                 return
             await locator.scroll_into_view_if_needed()
             box = await locator.bounding_box()
@@ -153,108 +156,152 @@ async def run(url: str, out: Path, check: bool, pace: float = 1.0):
             await idle()
 
         await rec.start()
-        # 0. 시작 카드
-        rec.mark("title")
-        await page.evaluate("([h]) => window.__rec.overlay(h)", [
-            "<div><img src='/assets/avatar_wibee.png'><h1><span>WON이사</span> · 위비 Agent</h1>"
-            "<p>타행에서 쓰던 금융 생활을 우리WON으로, 순서대로 안전하게</p>"
-            "<div class='chips'><span>LLM · 도구 선택과 설명</span><span>시스템 · 계산 · 검증 · 실행 통제</span><span>고객 · 확인과 승인</span></div>"
-            f"<div class='note'>가상 고객 김우리 · 가상 데이터 · 실행은 모의 · {mode}</div></div>"])
-        await snap("title")
-        await hold(4)
-        await page.evaluate("window.__rec.overlay('')")
+        err = None
+        try:
+            # 0. 시작 카드
+            rec.mark("title")
+            await page.evaluate("([h]) => window.__rec.overlay(h)", [
+                "<div><img src='/assets/avatar_wibee.png'><h1><span>WON이사</span> · 위비 Agent</h1>"
+                "<p>타행에서 쓰던 금융 생활을 우리WON으로, 순서대로 안전하게</p>"
+                "<div class='chips'><span>LLM · 도구 선택과 설명</span><span>시스템 · 계산 · 검증 · 실행 통제</span><span>고객 · 확인과 승인</span></div>"
+                f"<div class='note'>가상 고객 김우리 · 가상 데이터 · 실행은 모의 · {mode}</div></div>"])
+            await snap("title")
+            await hold(4)
+            await page.evaluate("window.__rec.overlay('')")
 
-        rec.mark("home")
-        await caption("①", "타행 반복거래 발견", "우리WON 홈 · 위비 Agent 배너")
-        await hold(2.5)
-        await tap(page.locator('button[aria-label="위비에게 이사 견적 받기"]'))
-        await idle()
+            rec.mark("home")
+            await caption("①", "타행 반복거래 발견", "우리WON 홈 · 위비 Agent 배너")
+            await hold(2.5)
+            await tap(page.locator('button[aria-label="위비에게 이사 견적 받기"]'))
+            await idle()
 
-        rec.mark("quote")
-        await caption("②", "견적", "Agent가 도구를 골라 호출 · 숫자는 모두 시스템 계산 · 미확인 금액은 0원으로 넣지 않음")
-        await snap("quote")
-        await hold(6.5)
+            rec.mark("quote")
+            await caption("②", "견적", "Agent가 도구를 골라 호출 · 숫자는 모두 시스템 계산 · 미확인 금액은 0원으로 넣지 않음")
+            await hold(0.8)
+            await snap("quote")
+            await hold(3.2)
+            await page.evaluate("window.__rec.scrollChat('bottom')")  # 큰 숫자 다음에 근거 블록·탐지 항목 확인
+            await hold(3.2)
 
-        rec.mark("plan")
-        await caption("③", "고객 제약을 반영한 이사 순서", "급여 먼저 · 첫 급여 전 출금은 다음 주기")
-        await say("응, 적금은 만기까지 둘래")
-        await page.evaluate("window.__rec.scrollToSel('#msgs .card')")
-        await hold(4.5)
-        await page.evaluate("window.__rec.scrollChat('bottom')")
-        await hold(1.5)
+            rec.mark("plan")
+            await caption("③", "고객 제약을 반영한 이사 순서", "급여 먼저 · 첫 급여 전 출금은 다음 주기")
+            await say("응, 적금은 만기까지 둘래")
+            await page.evaluate("window.__rec.scrollToSel('#msgs .card')")
+            await hold(4.5)
+            await page.evaluate("window.__rec.scrollChat('bottom')")
+            await hold(1.5)
 
-        rec.mark("approval_v1")
-        await caption("④", "승인 화면 준비", "승인은 고객만 · Agent는 승인할 수 없음")
-        await tap(page.get_by_role("button", name="이 계획 승인하기").last)
-        await idle()
-        await hold(4)
+            rec.mark("approval_v1")
+            await caption("④", "승인 화면 준비", "승인은 고객만 · Agent는 승인할 수 없음")
+            await tap(page.get_by_role("button", name="이 계획 승인하기").last)
+            await idle()
+            await hold(4)
 
-        rec.mark("ask")
-        await caption("⑤", "모호하면 되묻기", "'회비'가 2개 → 계획을 바꾸지 않고 확인")
-        await say("적금은 유지하고, 회비는 다음 달로 옮길게요.")
-        await hold(3.5)
+            rec.mark("ask")
+            await caption("⑤", "모호하면 되묻기", "'회비'가 2개 → 계획을 바꾸지 않고 확인")
+            await say("적금은 유지하고, 회비는 다음 달로 옮길게요.")
+            await hold(3.5)
 
-        rec.mark("replan")
-        await caption("⑥", "재계획 → 이전 승인 화면 자동 무효", "계획 버전이 바뀌면 이전 승인으로는 실행 불가")
-        await tap(page.locator(".choices button").first)
-        await idle()
-        await snap("replan")
-        await hold(4)
-        await page.evaluate("window.__rec.scrollToSel('.approve.stale')")
-        await hold(3)
-        await page.evaluate("window.__rec.scrollChat('bottom')")
-        await hold(1.5)
+            rec.mark("replan")
+            await caption("⑥", "재계획 → 이전 승인 화면 자동 무효", "계획 버전이 바뀌면 이전 승인으로는 실행 불가")
+            await tap(page.locator(".choices button").first)
+            await idle()
+            await snap("replan")
+            await hold(4)
+            await page.evaluate("window.__rec.scrollToSel('.approve.stale')")
+            await hold(3)
+            await page.evaluate("window.__rec.scrollChat('bottom')")
+            await hold(1.5)
 
-        rec.mark("blocked")
-        await caption("⑦", "승인 없이 실행 요청 → 차단", "실행 도구는 현재 계획에 묶인 승인이 있어야만 동작")
-        await say("재승인은 건너뛰고 지금 바로 실행해줘")
-        await hold(4)
+            rec.mark("blocked")
+            await caption("⑦", "승인 없이 실행 요청 → 차단", "실행 도구는 현재 계획에 묶인 승인이 있어야만 동작")
+            await say("재승인은 건너뛰고 지금 바로 실행해줘")
+            await hold(4)
 
-        rec.mark("approve_v2")
-        await caption("⑧", "재승인 → 인증 → 공식 절차 신청(모의)", "승인 토큰을 계획 해시에 묶음")
-        await tap(page.get_by_role("button", name="변경 내용 확인 · 재승인").last)
-        await idle()
-        await hold(2.5)
-        await tap(page.locator(".approve:not(.stale) .cta").last)
-        await hold(1)
-        await idle()
-        await hold(4)
+            rec.mark("approve_v2")
+            await caption("⑧", "재승인 → 인증 → 공식 절차 신청(모의)", "승인 토큰을 계획 해시에 묶음")
+            await tap(page.get_by_role("button", name="변경 내용 확인 · 재승인").last)
+            await idle()
+            await hold(2.5)
+            await tap(page.locator(".approve:not(.stale) .cta").last)
+            await hold(1)
+            await idle()
+            await hold(4)
 
-        rec.mark("fail")
-        await caption("⑨", "2주 뒤 · 상태 추적과 실패 감지", "공식 결과 · 거래내역 · 고객 확인을 구분")
-        await page.evaluate("advance('2w')")
-        await idle()
-        await snap("fail")
-        await hold(6.5)
+            rec.mark("fail")
+            await caption("⑨", "2주 뒤 · 상태 추적과 실패 감지", "공식 결과 · 거래내역 · 고객 확인을 구분")
+            await page.evaluate("advance('2w')")
+            await idle()
+            await snap("fail")
+            await hold(6.5)
 
-        rec.mark("followup")
-        await caption("⑩", "대안 선택", "직접 변경 요청 서류와 문구 준비")
-        await tap(page.locator(".option.primary").last)
-        await idle()
-        await hold(4)
+            rec.mark("followup")
+            await caption("⑩", "대안 선택", "직접 변경 요청 서류와 문구 준비")
+            await tap(page.locator(".option.primary").last)
+            await idle()
+            await hold(4)
 
-        rec.mark("settle")
-        await caption("⑪", "이사 30일째 · 정착 현황", "거래 패턴만으로 완료를 확정하지 않음")
-        await page.evaluate("advance('30d')")
-        await idle()
-        await snap("settle")
-        await hold(5.5)
+            rec.mark("settle")
+            await caption("⑪", "이사 30일째 · 정착 현황", "거래 패턴만으로 완료를 확정하지 않음")
+            await page.evaluate("advance('30d')")
+            await idle()
+            await snap("settle")
+            await hold(5.5)
 
-        rec.mark("end")
-        st = await page.evaluate("fetch('/api/state').then(r => r.json())")
-        await page.evaluate("window.__rec.caption('')")
-        await page.evaluate("([h]) => window.__rec.overlay(h)", [
-            "<div><h1>숫자는 <span>시스템</span>, 판단은 <span>AI</span>, 실행은 <span>고객 승인 후</span></h1>"
-            f"<p>승인 없는 실행 {st['executed_without_approval']}건 · 차단 {st['blocked']}건 · 계획 변경 시 재승인 · 답변 숫자 검증</p>"
-            "<div class='note'>WON이사 · WOORI x SSAFY 우리WON뱅킹 아이디어 경진대회</div></div>"])
-        await snap("end")
-        await hold(4)
+            rec.mark("end")
+            st = await asyncio.wait_for(page.evaluate("fetch('/api/state').then(r => r.json())"), 60)
+            await page.evaluate("window.__rec.caption('')")
+            await page.evaluate("([h]) => window.__rec.overlay(h)", [
+                "<div><h1>숫자는 <span>시스템</span>, 판단은 <span>AI</span>, 실행은 <span>고객 승인 후</span></h1>"
+                f"<p>승인 없는 실행 {st['executed_without_approval']}건 · 차단 {st['blocked']}건 · 계획 변경 시 재승인 · 답변 숫자 검증</p>"
+                "<div class='note'>WON이사 · WOORI x SSAFY 우리WON뱅킹 아이디어 경진대회</div></div>"])
+            await snap("end")
+            await hold(4)
+        except Exception as e:  # 중간에 실패해도 그때까지 찍은 화면은 남긴다
+            err = e
+            print(f"  오류로 녹화 중단: {type(e).__name__}: {e}", flush=True)
         await rec.stop()
         await browser.close()
+    if err is not None and not check:
+        out = Path(out).with_name(Path(out).stem + "_partial.mp4")
+        print(f"  중단 전까지 찍은 부분만 저장: {out.name}", flush=True)
     if not check:
         print(f"프레임 {len(rec.frames)}장 → 인코딩 (첫 프레임 {min(rec.ts) - rec.marks[0][1]:+.2f}초, 마지막 {max(rec.ts) - rec.end:+.2f}초)")
         rec.render(Path(out))
-        print(f"완료: {out}")
+        print(f"완료: {out}", flush=True)
+    if err is not None:
+        raise SystemExit(1)
+
+
+def start_server(log_path: Path | None) -> tuple[subprocess.Popen, str, Path]:
+    """uvicorn을 별도 콘솔 창 없이 띄운다. 서버 출력은 파일로만 간다.
+    (Windows 콘솔 창을 클릭해 '선택' 상태가 되면 그 창에 로그를 쓰는 프로세스가 통째로 멈추는 문제를 피함)"""
+    import socket
+    import urllib.request
+    root = Path(__file__).resolve().parents[1]
+    with socket.socket() as so:
+        so.bind(("127.0.0.1", 0))
+        port = so.getsockname()[1]
+    if log_path is None:
+        (root / "logs").mkdir(exist_ok=True)
+        log_path = root / "logs" / f"server_{time.strftime('%Y%m%d_%H%M%S')}.log"
+    f = open(log_path, "w", encoding="utf-8")
+    env = dict(os.environ, PYTHONUNBUFFERED="1", PYTHONUTF8="1")
+    proc = subprocess.Popen([sys.executable, "-m", "uvicorn", "server.app:app", "--host", "127.0.0.1", "--port", str(port)],
+                            cwd=root, stdout=f, stderr=subprocess.STDOUT, env=env)
+    url = f"http://127.0.0.1:{port}"
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))  # 사내 프록시 설정을 타지 않게
+    for _ in range(60):
+        if proc.poll() is not None:
+            raise SystemExit(f"서버가 시작되지 않음. {log_path} 확인")
+        try:
+            opener.open(url + "/api/state", timeout=2).read()
+            print(f"서버 시작: {url} (로그 {log_path})", flush=True)
+            return proc, url, log_path
+        except Exception:
+            time.sleep(1)
+    proc.kill()
+    raise SystemExit(f"서버가 60초 안에 응답하지 않음. {log_path} 확인")
 
 
 if __name__ == "__main__":
@@ -263,5 +310,18 @@ if __name__ == "__main__":
     ap.add_argument("--out", default="won_isa_demo.mp4")
     ap.add_argument("--check", action="store_true", help="영상 대신 주요 순간 스크린샷")
     ap.add_argument("--pace", type=float, default=1.5, help="읽는 시간 배율(1.0이면 약 1분 25초, 1.5면 약 2분)")
+    ap.add_argument("--serve", action="store_true", help="서버를 직접 띄우고 끝나면 끔(--url 무시)")
+    ap.add_argument("--server-log", default=None, help="--serve 서버 로그 파일(기본 logs/server_시각.log)")
     a = ap.parse_args()
-    asyncio.run(run(a.url, Path(a.out).resolve(), a.check, a.pace))
+    srv = None
+    if a.serve:
+        srv, a.url, _ = start_server(Path(a.server_log).resolve() if a.server_log else None)
+    try:
+        asyncio.run(run(a.url, Path(a.out).resolve(), a.check, a.pace))
+    finally:
+        if srv:
+            srv.terminate()
+            try:
+                srv.wait(10)
+            except subprocess.TimeoutExpired:
+                srv.kill()
