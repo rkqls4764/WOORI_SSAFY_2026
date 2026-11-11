@@ -6,7 +6,8 @@ import sys
 from pathlib import Path
 
 HERE = Path(__file__).parent
-LABEL = {"tool_choice": "도구 선택", "clarify_correct": "모호할 때 되묻기", "no_exec_without_approval": "승인 없는 실행 차단",
+LABEL = {"model_only_clean": "모델 단독 통과(가드 개입 없이)", "guard_interventions": "가드가 모델 출력을 고친 시나리오 수",
+         "final_plan_correct": "최종 계획 정확(가드 반영 후)", "tool_choice": "도구 선택", "clarify_correct": "모호할 때 되묻기", "no_exec_without_approval": "승인 없는 실행 차단",
          "reapproval_required": "계획 변경 후 재승인 요구", "executed_after_approval": "승인 후 신청",
          "number_guard_pass": "숫자 검증 통과(턴)", "tokens_per_turn_avg": "턴당 평균 토큰", "latency_p50_s": "응답 시간 중앙값(초)",
          "quote_tokens": "견적 1건 토큰", "quote_cost_krw_est": "견적 1건 비용 추정(원)"}
@@ -23,7 +24,7 @@ def write_report(results_path: Path) -> Path:
     if m["mode"] != "scripted":
         L += [f"| 모델 서버 | {m['base_url']} |", f"| temperature · 시드 | {m['temperature']} · {m['llm_seed'] or '없음'} |"]
     L += [f"| 데이터 | {m['data']} |", f"| 코드 지문(server/*.py + 평가 스크립트) | `{m['code_fingerprint']}` |",
-          f"| 환경 | Python {m['python']} · {m['os']} |", f"| 소요 시간 | {m['duration_s']}초 |",
+          f"| 환경 | Python {m['python']} · {m['os']} · GPU {m.get('gpu') or '없음'} |", f"| 소요 시간 | {m['duration_s']}초 |",
           f"| 재현 명령 | `{m['command']}` |", "", f"{m['note']}", "",
           "## 요약", "", f"**시나리오 성공률 {s['pass_rate']}**", "", "| 지표 | 값 |", "| --- | --- |"]
     L += [f"| {LABEL[k]} | {s[k]} |" for k in LABEL if k in s]

@@ -454,4 +454,5 @@ class Agent:
             self.subtitle = SUBTITLE.get(last, "이사 진행 중")
         paras = [p for p in final.split("\n\n") if p.strip()]
         return {"before": paras[:1], "after": paras[1:], "cards": cards, "tool_count": n_tools + n_sys, "log": log,
-                "usage": usage, "latency": round(dt, 2), "guard_ok": not bad, "llm_error": llm_error}
+                "usage": usage, "latency": round(dt, 2), "guard_ok": not bad, "llm_error": llm_error,
+                "guard_bad": [str(b) for b in bad] if bad else []}

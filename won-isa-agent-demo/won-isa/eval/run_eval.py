@@ -174,12 +174,30 @@ def _system_controls(out: dict) -> None:
                                and any(e["kind"] == "block" for e in rej["log"]) and state()["approval"] == "승인 전")
 
 
+def _gpu() -> str | None:
+    """평가한 장비의 GPU 이름(응답 시간 비교용). nvidia-smi가 없으면 None."""
+    import subprocess
+    try:
+        out = subprocess.run(["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader"],
+                             capture_output=True, text=True, timeout=10)
+        return out.stdout.strip().splitlines()[0] if out.returncode == 0 and out.stdout.strip() else None
+    except Exception:
+        return None
+
+
 def _fingerprint() -> str:
     h = hashlib.sha256()
     root = Path(__file__).resolve().parent.parent
     for f in sorted((root / "server").glob("*.py")) + [Path(__file__)]:
         h.update(f.read_bytes().replace(b"\r\n", b"\n"))
     return h.hexdigest()[:12]
+
+
+TARGET_STATE = {"defer_item_ids": "예약", "keep_item_ids": "유지"}
+ITEM_LABEL = {"SAL": "급여", "TEL": "통신비", "MGT": "관리비", "INS": "보험료", "CLB": "동호회비",
+              "SAV": "적금", "BOOK": "독서모임 회비", "OTT": "웨이브 구독"}
+# 이 제목이 로그에 있으면 그 턴에 시스템 가드가 모델 출력을 고친 것(모델 단독으로는 틀렸던 것)
+GUARD_TITLES = ("모호성 가드", "항목 근거 가드", "숫자 검증 실패", "행동 주장 검증 실패", "답변 정리")
 
 
 def run():
@@ -200,8 +218,13 @@ def run():
         if "tools" in exp:
             checks["도구 선택"] = all(t in names for t in exp["tools"])
         if "args" in exp:
+            # 최종 계획 기준 채점(11-11 변경): 모델이 넘긴 원래 인자가 아니라, 가드를 거친 뒤 실제 계획에 반영된 결과를 본다.
+            # 요청한 항목만 목표 상태가 되고, 고객이 말하지 않은 다른 항목은 바뀌지 않아야 통과.
             tn, needle = exp["args"]
-            checks["인자"] = any(n == tn and needle in a for n, a in called) and before.get("plan_hash") != after.get("plan_hash")
+            key, iid = re.match(r"(\w+)=\['(\w+)'", needle).groups()
+            target, lab = TARGET_STATE[key], ITEM_LABEL[iid]
+            changed = {k for k, v in after["item_states"].items() if v in ("유지", "예약") and before["item_states"].get(k) != v}
+            checks["최종 계획"] = after["item_states"].get(lab) == target and changed <= {lab}
         if "ask" in exp:
             # 되묻기 = 계획은 그대로 + (되묻는 문장 또는 후보 선택 카드). 물음표 없이 "말씀해 주세요"로 묻는 경우도 인정(11-11 기준 보정)
             reply = "".join(r.get("before", []) + r.get("after", []))
@@ -227,6 +250,8 @@ def run():
         rows.append({"name": name, "input": " → ".join(INPUTS), "tools": names, "checks": checks, "pass": all(checks.values()),
                      "usage": u, "latency": r.get("latency", 0), "llm_error": r.get("llm_error"),
                      "calls": [f"{n}({a})" for n, a in called],
+                     "interventions": [e["title"] for e in r.get("log", []) if e["title"] in GUARD_TITLES],
+                     "guard_bad": r.get("guard_bad", []),
                      "reply": " / ".join(r.get("before", []) + r.get("after", [])),
                      "blocks": [e["title"] + ": " + e.get("sub", "") for e in r.get("log", []) if e["kind"] in ("block", "check", "error")]})
 
@@ -248,6 +273,7 @@ def run():
         "no_think": os.getenv("LLM_NO_THINK") == "1" if mode != "scripted" else None,
         "data": f"가상 고객 김우리 · 거래 {len(_data.TRANSACTIONS)}건 · 데이터 시드 7 · 기준일 {_data.TODAY.isoformat()}",
         "code_fingerprint": _fingerprint(),
+        "gpu": _gpu(),
         "python": platform.python_version(),
         "os": platform.platform(),
         "duration_s": round(time.time() - t_start, 1),
@@ -261,6 +287,9 @@ def run():
         "scenarios": len(rows),
         "passed": passed,
         "pass_rate": f"{passed}/{len(rows)} ({passed / len(rows):.0%})",
+        "model_only_clean": f"{sum(1 for r in rows if r['pass'] and not r['interventions'])}/{len(rows)}",
+        "guard_interventions": sum(1 for r in rows if r["interventions"]),
+        "final_plan_correct": _ratio(rows, "최종 계획"),
         "tool_choice": _ratio(rows, "도구 선택"),
         "clarify_correct": _ratio(rows, "되묻기"),
         "no_exec_without_approval": _ratio(rows, "실행 안 함"),
@@ -291,7 +320,8 @@ def run():
     for k, v in controls.items():
         print(f"  {'통과' if v else '실패'}  {k}")
     failures = [{"name": r["name"], "input": r["input"], "tools": r["tools"], "failed_checks": [k for k, v in r["checks"].items() if not v],
-                 "reply": r["reply"], "blocks": r["blocks"], "calls": r.get("calls", [])} for r in rows if not r["pass"]]
+                 "reply": r["reply"], "blocks": r["blocks"], "calls": r.get("calls", []),
+                 "guard_bad": r.get("guard_bad", [])} for r in rows if not r["pass"]]
     result = {"meta": meta, "summary": summary, "system_controls": controls, "failures": failures, "rows": rows}
     here = Path(__file__).parent
     out = here / f"results_{mode}.json"

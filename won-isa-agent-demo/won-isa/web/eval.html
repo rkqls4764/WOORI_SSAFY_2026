@@ -44,7 +44,8 @@
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const pill = (ok) => `<span class="p ${ok ? "p-ok" : "p-no"}">${ok ? "통과" : "실패"}</span>`;
 const pct = (x) => (x * 100).toFixed(1) + "%";
-const LABEL = { tool_choice: "도구 선택", clarify_correct: "모호할 때 되묻기", no_exec_without_approval: "승인 없는 실행 차단",
+const LABEL = { model_only_clean: "모델 단독 통과(가드 개입 없이)", guard_interventions: "가드가 모델 출력을 고친 시나리오 수",
+  final_plan_correct: "최종 계획 정확(가드 반영 후)", tool_choice: "도구 선택", clarify_correct: "모호할 때 되묻기", no_exec_without_approval: "승인 없는 실행 차단",
   reapproval_required: "계획 변경 후 재승인 요구", executed_after_approval: "승인 후 신청", number_guard_pass: "숫자 검증 통과(턴)",
   tokens_per_turn_avg: "턴당 평균 토큰", latency_p50_s: "응답 시간 중앙값(초)", quote_tokens: "견적 1건 토큰", quote_cost_krw_est: "견적 1건 비용 추정(원)" };
 let data = null;
