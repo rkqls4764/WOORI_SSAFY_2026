@@ -1,21 +1,24 @@
-==== WON-ISA LLM eval x3 2026-11-11 16:14:33.02 ==== 
+==== WON-ISA LLM eval x3 2026-11-12 10:15:20.87 ==== 
 
 Code copied to C:\Users\SSAFY\AppData\Local\won-isa\snap 
 [0] Smoke test... 
 mode: openai | model: qwen3:8b
-tools: ['get_transactions(months=6)', 'detect_recurring()', 'calc_switch_quote()']
-cards: ['items', 'quote'] | guard_ok: True | tokens: {'prompt': 10165, 'completion': 905} | sec: 18.6
-reply: 우리WON으로 이사하면 연간 약 6만 원의 추가 이자가 예상됩니다. 다만, A은행 기존 혜택 상실과 해지 손실 여부 등 확인이 필요한 사항이 있어요. 이사 계획으로 진행하시겠어요?
+tools: ['calc_switch_quote()']
+cards: ['quote'] | guard_ok: True | tokens: {'prompt': 4719, 'completion': 572} | sec: 13.5
+reply: 우리WON으로 이전 시 연 3.0% 금리 차이로 약 6만 원(세전) 추가 이자가 예상돼요.  
+일평균 잔액 200만 원 유지 시 적용되며, 전월 급여이체 +2.0%p, 신규 급여이체 +1.0%p 혜택도 포함돼요.   / 확인 중인 사항은 A은행 기존 혜택 상실 여부와 해지 손실·추가 비용이에요.  
+이사 후 정착 현황은 결과가 오면 알려드릴게요.  
+옮기는 순서도 짜 드릴까요?
 SMOKE_OK
 NAME        ID              SIZE      PROCESSOR    CONTEXT    RUNNER      UNTIL              
 qwen3:8b    500a1f067a9f    6.4 GB    100% GPU     16384      llamacpp    4 minutes from now    
 GPU OK 
-[1/3] evaluation started 16:15:00.12 
-[1/3] done 16:30:27.52 
-[2/3] evaluation started 16:30:27.52 
-[2/3] done 16:45:47.97 
-[3/3] evaluation started 16:45:47.97 
-[3/3] done 17:01:11.62 
+[1/3] evaluation started 10:15:43.04 
+[1/3] done 10:43:25.38 
+[2/3] evaluation started 10:43:25.38 
+[2/3] done 11:10:42.80 
+[3/3] evaluation started 11:10:42.80 
+[3/3] done 11:37:52.13 
 NAME        ID              SIZE      PROCESSOR    CONTEXT    RUNNER      UNTIL              
 qwen3:8b    500a1f067a9f    6.4 GB    100% GPU     16384      llamacpp    4 minutes from now    
-==== DONE 2026-11-11 17:01:11.67 ==== 
+==== DONE 2026-11-12 11:37:52.18 ==== 

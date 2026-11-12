@@ -584,7 +584,8 @@ class Agent:
         bad = guard.check(final, self.allowed)
         if bad:
             self.totals["guard_fail"] += 1
-            self.session.log("NUMBER_GUARD_FAILED", "system", unverified=[str(b) for b in bad], action="템플릿 문장으로 대체")
+            self.session.log("NUMBER_GUARD_FAILED", "system", unverified=[str(b) for b in bad], action="템플릿 문장으로 대체",
+                             replaced_reply=final[:300])  # 원래 답변(사후 분석용)
             log.append({"kind": "check", "title": "숫자 검증 실패", "sub": f"도구 결과에 없는 숫자 {len(bad)}개 → 템플릿 문장으로 대체", "fail": True})
             final = "결과를 카드로 정리했어요. 숫자는 카드의 시스템 계산 값을 확인해 주세요." if cards else "확인한 내용을 정리하지 못했어요. 다시 말씀해 주세요."
         elif re.search(r"\d", final):

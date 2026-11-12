@@ -14,6 +14,8 @@ _RE_PCT = re.compile(rf"({_NUM})\s*%p?")
 # 날짜: '11.25', '12월 15일', '2026-11-25'
 _RE_DATE_DOT = re.compile(r"(?<![\d.])(1[0-2]|[1-9])\.(\d{1,2})(?![\d%])")
 _RE_DATE_KO = re.compile(r"(1[0-2]|[1-9])월\s*(\d{1,2})일")
+# 월만 말한 경우: '12월부터', '12월분' (도구 결과 날짜에 그 달이 있으면 허용)
+_RE_MONTH = re.compile(r"(1[0-2]|[1-9])\s*월(?!\s*\d)")
 _RE_DATE_ISO = re.compile(r"(20\d\d)-(\d\d)-(\d\d)")
 # 연도: '2027년' (도구 결과의 ISO 날짜에서 온 연도면 허용)
 _RE_YEAR = re.compile(r"(20\d\d)\s*년")
@@ -32,7 +34,7 @@ def extract(text: str) -> set:
     out, used = set(), []
     t = str(text)
     for m in _RE_DATE_ISO.finditer(t):
-        out.add(("date", int(m.group(2)), int(m.group(3)))); out.add(("year", int(m.group(1)))); used.append(m.span())
+        out.add(("date", int(m.group(2)), int(m.group(3)))); out.add(("month", int(m.group(2)))); out.add(("year", int(m.group(1)))); used.append(m.span())
     for m in _RE_YEAR.finditer(t):
         out.add(("year", int(m.group(1)))); used.append(m.span())
     for m in _RE_COMPOUND.finditer(t):
@@ -40,7 +42,11 @@ def extract(text: str) -> set:
             continue
         out.add(("num", int(m.group(1)) * 10_000 + round(_num(m.group(2))))); used.append(m.span())
     for m in _RE_DATE_KO.finditer(t):
-        out.add(("date", int(m.group(1)), int(m.group(2)))); used.append(m.span())
+        out.add(("date", int(m.group(1)), int(m.group(2)))); out.add(("month", int(m.group(1)))); used.append(m.span())
+    for m in _RE_MONTH.finditer(t):
+        if any(a <= m.start() < b for a, b in used):
+            continue
+        out.add(("month", int(m.group(1)))); used.append(m.span())
     for m in _RE_MONEY.finditer(t):
         if any(a <= m.start() < b for a, b in used):
             continue
