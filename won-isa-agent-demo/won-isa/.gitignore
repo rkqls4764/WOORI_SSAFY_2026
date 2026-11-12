@@ -2,3 +2,7 @@
 .venv/
 __pycache__/
 logs/
+
+# 녹화 영상·임시 번들은 레포에 올리지 않음
+*.mp4
+*.bundle
