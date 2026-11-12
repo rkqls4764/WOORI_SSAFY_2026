@@ -5,7 +5,7 @@ const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<
 const won = (n) => Number(n).toLocaleString("ko-KR");
 const md = (iso) => { const [, m, d] = iso.split("-").map(Number); return `${m}.${String(d).padStart(2, "0")}`; };
 
-let busy = false, logNo = 0, currentHash = null;
+let busy = false, logNo = 0, currentHash = null, persona = null;
 
 async function post(path, body) {
   const r = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) });
@@ -24,14 +24,45 @@ function scrollDown() { const m = msgs(); requestAnimationFrame(() => m.scrollTo
 function userBubble(text) {
   const r = el("div", "row me"); r.append(el("div", "bub", esc(text))); msgs().append(r);
 }
+const avatar = () => (persona ? persona.img : "/assets/avatar_wibee.png");
 function botBubble(text) {
-  const r = el("div", "row"); r.append(img("/assets/avatar_wibee.png", "ava"), el("div", "bub", esc(text))); msgs().append(r); return r;
+  const r = el("div", "row"); r.append(img(avatar(), "ava" + (persona ? " char" : "")), el("div", "bub", esc(text))); msgs().append(r); return r;
 }
 function img(src, cls) { const i = el("img", cls); i.src = src; i.alt = ""; return i; }
 function typing() { const r = botBubble("•••"); r.classList.add("typing"); scrollDown(); return r; }
 
 // ---------------------------------------------------------------- 카드(시스템 데이터)
-const BADGE = { "먼저": "t-b", "진행": "t-b", "대기": "t-gray", "다음 달": "t-y", "만기 후": "t-gray" };
+const BADGE = { "먼저": "t-b", "진행": "t-b", "대기": "t-gray", "다음 달": "t-y", "만기 후": "t-gray", "고객": "t-y" };
+
+// 근거 블록: 견적·일정 카드마다 데이터 출처 / 적용 규칙 / 가정 / 고객 확인 필요를 항상 붙인다(값은 서버 도구 결과)
+function basisBlock(b) {
+  if (!b) return "";
+  const row = (name, cls, arr) => (arr && arr.length)
+    ? `<div class="b-row"><span class="tag ${cls}">${name}</span><ul>${arr.map((x) => `<li>${esc(x)}</li>`).join("")}</ul></div>` : "";
+  return `<div class="basis"><div class="b-head">이 결과의 근거</div>${row("데이터 출처", "t-gray", b.sources)}${row("적용 규칙", "t-g", b.rules)}${row("가정", "t-y", b.assumptions)}${row("고객 확인 필요", "t-r", b.confirm)}</div>`;
+}
+
+// 탐지 항목 확인: 탐지 근거(횟수·간격)와 고객의 항목별 결정(확정·포함·제외)
+function itemsCard(c) {
+  document.querySelectorAll(".items button").forEach((b) => { b.disabled = true; });  // 지난 카드의 버튼은 잠금
+  const k = el("details", "card items");
+  if (c.open) k.open = true;
+  const tone = { "자동 탐지": "t-g", "고객 확정": "t-b", "확인 필요": "t-y", "고객 제외": "t-gray", "해지 추정": "t-gray" };
+  const rows = c.rows.map((r) => {
+    let btn = "";
+    if (r.can_decide) {
+      if (r.status === "확인 필요" && r.in_plan) btn += `<button data-decide="${r.id}:confirm" data-label="${esc(r.label)}">확정</button>`;
+      btn += r.in_plan ? `<button data-decide="${r.id}:exclude" data-label="${esc(r.label)}">제외</button>`
+                       : `<button data-decide="${r.id}:include" data-label="${esc(r.label)}">포함</button>`;
+    }
+    return `<div class="it"><div><b>${esc(r.label)}</b> <span class="k">${esc(r.kind)} · ${won(r.amount)}원</span>
+      <div class="s">${esc(r.evidence)}${r.note ? " · " + esc(r.note) : ""}</div></div>
+      <div class="act"><span class="tag ${tone[r.status] || "t-gray"}">${esc(r.status)}</span>${btn}</div></div>`;
+  }).join("");
+  k.innerHTML = `<summary>탐지 항목 ${c.rows.length}건 확인 ${c.pending ? `<span class="tag t-y">확인 필요 ${c.pending}</span>` : '<span class="tag t-g">확인 완료</span>'}</summary>
+    ${rows}<div class="muted">탐지 규칙(시스템): ${esc(c.rule)}</div>`;
+  return k;
+}
 
 function quoteCard(c) {
   const k = el("div", "card quote indent");
@@ -43,7 +74,7 @@ function quoteCard(c) {
     <div class="kv"><span>금리 차이</span><b class="blue">연 ${c.rate_diff.toFixed(1)}%p</b></div>
     <div class="muted">${won(c.assumed_balance / 10000)}만 원 × ${c.rate_diff.toFixed(1)}%p · ${esc(c.assumptions[0])}</div>
     <div class="warn">총순혜택은 ${esc(c.net_benefit)} <span>미확인 ${c.unconfirmed.length}개 ›</span></div>
-    <div class="shield">${esc(c.rule)}요</div>`;
+    <div class="shield">${esc(c.rule)}요</div>${basisBlock(c.basis)}`;
   return k;
 }
 
@@ -53,7 +84,7 @@ function planCard(c) {
       <span class="tag ${BADGE[s.badge] || "t-gray"}">${esc(s.badge)}</span></li>`).join("");
   const ex = c.excluded.map((x) => `<div><b>제외 · ${esc(x.label)}</b><br>${esc(x.reason)}</div>`).join("");
   k.innerHTML = `<h4>이사 순서 <span class="tag t-g">영업일 규칙</span></h4><ol class="steps">${steps}</ol>
-    ${ex ? `<div class="excl">${ex}</div>` : ""}<div class="muted">계획 v${c.version} · 해시 ${c.plan_hash.slice(0, 6)}</div>`;
+    ${ex ? `<div class="excl">${ex}</div>` : ""}${basisBlock(c.basis)}<div class="muted">계획 v${c.version} · 해시 ${c.plan_hash.slice(0, 6)}</div>`;
   return k;
 }
 
@@ -63,7 +94,7 @@ function diffCard(c) {
     `<tr class="${d.changed ? "chg" : ""}"><td>${esc(d.label)}</td><td>${esc(d.before)}</td><td>${esc(d.after)}</td></tr>`).join("");
   k.innerHTML = `<h4>바뀐 계획 ${c.reapproval_required ? '<span class="tag t-r">재승인 필요</span>' : '<span class="tag t-b">변경됨</span>'}</h4>
     <table class="diff"><tr><th>항목</th><th>변경 전</th><th>변경 후</th></tr>${rows}</table>
-    <div class="muted">계획 v${c.version - 1} → v${c.version} · 이전 승인은 무효</div>`;
+    ${basisBlock(c.basis)}<div class="muted">계획 v${c.version - 1} → v${c.version} · 이전 승인은 무효</div>`;
   const b = el("button", "cta", "변경 내용 확인 · 재승인"); b.onclick = () => send("변경 내용 확인했어요. 재승인할게요");
   k.append(b);
   return k;
@@ -77,7 +108,9 @@ function approvalCards(c) {
   const ap = el("div", "card approve");
   ap.dataset.hash = c.plan_hash; ap.dataset.version = c.plan_version;
   ap.innerHTML = `<span class="tag t-r" style="background:#fdeee6">고객 승인</span><h5>승인하면 이렇게 진행돼요</h5>
-    <ul class="checks">${c.on_approve.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>`;
+    <ul class="checks">${c.on_approve.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>` +
+    ((c.confirm_on_approve || []).length ? `<div class="confirm"><b>승인하면 함께 확정되는 '확인 필요' 항목</b>${c.confirm_on_approve.map((x) => `<div>${esc(x)}</div>`).join("")}</div>` : "") +
+    (c.auth_boundary ? `<div class="bound"><span class="tag t-y">데모</span> ${esc(c.auth_boundary.demo)}<br><span class="tag t-gray">운영</span> ${esc(c.auth_boundary.production)}</div>` : "");
   const b = el("button", "cta lock", "인증하고 승인하기");
   b.onclick = () => approve(c.plan_hash);
   ap.append(b, el("div", "muted", `계획 v${c.plan_version} · 해시 ${c.plan_hash.slice(0, 6)}에만 유효한 승인`));
@@ -95,7 +128,8 @@ function execCard(c) {
   k.innerHTML = `<h4>공식 절차 신청 <span class="tag t-g">시스템 실행</span></h4>` +
     c.requested.map((x) => `<div class="kv"><span>${esc(x)}</span><span class="tag t-b">신청</span></div>`).join("") +
     c.scheduled.map((x) => `<div class="kv"><span>${esc(x)}</span><span class="tag t-y">예약</span></div>`).join("") +
-    (c.duplicate_prevented ? `<div class="muted">이미 신청된 ${c.duplicate_prevented}건은 다시 실행하지 않음(중복 방지)</div>` : "");
+    (c.duplicate_prevented ? `<div class="muted">이미 신청된 ${c.duplicate_prevented}건은 다시 실행하지 않음(중복 방지)</div>` : "") +
+    (c.channel ? `<div class="muted">기관 연동: ${esc(c.channel)}</div>` : "");
   return k;
 }
 
@@ -141,8 +175,108 @@ function settleView(c, bubbles) {
       <span class="tag ${tone[r.tag] || "t-gray"}">${esc(r.tag)}</span></div>`).join("")}</div>`;
   const row = el("div", "row"); row.append(img("/assets/avatar_wibee.png", "ava"), el("div", "bub", esc(bubbles.join("\n"))));
   const b = el("button", "cta", "남은 항목 확인하기"); b.onclick = () => { show("chat"); send("남은 항목 확인해 줘"); };
-  s.append(row, b, el("div", "rule", esc(c.rule) + "요"));
+  s.append(row, b);
+  if (c.offer_reco) {
+    const r2 = el("button", "cta ghost2", "소비 분석하고 담당 캐릭터 찾기");
+    r2.onclick = () => { show("chat"); botBubble("이사가 거의 끝났어요. 소비 패턴에 맞는 담당 캐릭터를 찾아 드릴까요?"); msgs().append(consentCard()); scrollDown(); };
+    s.append(r2);
+  }
+  s.append(el("div", "rule", esc(c.rule) + "요"));
   show("settle");
+}
+
+// ---------------------------------------------------------------- 정착 단계(추천 Agent) 카드
+function consentCard() {
+  const k = el("div", "card indent consent");
+  k.innerHTML = `<h4>소비 분석 동의 <span class="tag t-gray">선택</span></h4>
+    <div class="kv"><span>쓰는 정보</span><b>카드 결제 내역 최근 90일</b></div>
+    <div class="kv"><span>목적</span><b>소비 유형 분석 · 맞춤 추천</b></div>
+    <div class="kv"><span>이사 동의와</span><b>별도 · 언제든 철회</b></div>`;
+  const b = el("button", "cta", "동의하고 분석하기");
+  b.onclick = () => { b.disabled = true; run("고객: 소비 분석 동의(화면 조작)", () => post("/api/consent"), null); };
+  k.append(b);
+  return k;
+}
+
+function matchCard(c) {
+  const m = c.match, rc = c.recommended_character;
+  const k = el("div", "card indent match");
+  const bars = c.by_category.slice(0, 5).map((r) => `<div class="bar-row"><span>${esc(r.category)}</span>
+      <i><b style="width:${Math.round(r.share * 100)}%"></b></i><em>${Math.round(r.share * 100)}%</em></div>`).join("");
+  k.innerHTML = `<h4>소비 유형 · ${esc(m.type)} <span class="tag t-g">시스템 계산</span></h4>
+    <div class="char-hero"><img src="${rc.img}" alt=""><div><small>담당 캐릭터 제안</small><b>${esc(rc.name)}</b><span>${esc(m.why)}</span></div></div>
+    ${bars}<div class="muted">카드 결제 ${c.period.days}일 · 월평균 ${won(c.card_monthly_avg)}원 · 배달 주 ${c.delivery.weekly_avg}회</div>${basisBlock(c.basis)}`;
+  const go = el("button", "cta", `${esc(rc.name)}와 함께하기`);
+  go.onclick = () => choosePersona(rc.id, rc.name);
+  const other = el("div", "char-pick");
+  c.characters.filter((x) => x.id !== rc.id).forEach((x) => {
+    const b = el("button", null, `<img src="${x.img}" alt=""><span>${esc(x.name)}</span><small>${esc(x.type)}</small>`);
+    b.onclick = () => choosePersona(x.id, x.name); other.append(b);
+  });
+  const lab = el("div", "muted", "다른 캐릭터를 고를 수도 있어요");
+  k.append(go, lab, other);
+  return k;
+}
+
+function goalCard(c) {
+  const w = el("div", "choices goal");
+  c.options.forEach((g) => { const b = el("button", null, esc(g)); b.onclick = () => { w.querySelectorAll("button").forEach((x) => { x.disabled = true; }); run(`고객: 목표 '${g}' 선택(화면 조작)`, () => post("/api/goal", { goal: g }), g); }; w.append(b); });
+  return w;
+}
+
+function recoCard(c) {
+  const k = el("div", "card indent reco");
+  const prods = c.products.map((p) => `<div class="prod"><div><b>${esc(p.name)}</b><span class="tag t-b">${esc(p.kind)}</span></div>
+      <div class="s">${esc(p.fit)} · ${esc(p.terms)}</div><div class="s">${esc(p.rate)}</div>
+      <div class="s link">${esc(p.link_to_move)}</div></div>`).join("");
+  k.innerHTML = `<h4>'${esc(c.goal)}' 맞춤 추천 <span class="tag t-g">시스템 계산</span></h4>
+    <div class="sec">미션</div><div class="missions"></div><div class="sec">예금성 상품</div>${prods}
+    <div class="muted">${c.rules.map(esc).join(" · ")} · 상품 정보 ${esc(c.as_of)} 확인</div>`;
+  const box = k.querySelector(".missions");
+  c.missions.forEach((m) => {
+    const joined = (c.joined || []).includes(m.id);
+    const row = el("div", "mission", `<div><b>${esc(m.title)}</b><span class="s">${esc(m.calc)}</span>
+      <span class="honey">달성 시 꿀머니 ${won(m.reward)}</span></div>`);
+    const b = el("button", joined ? "join done" : "join", joined ? "참여 중" : "참여하기");
+    b.disabled = joined;
+    b.onclick = () => { b.disabled = true; b.textContent = "참여 중"; b.classList.add("done"); run(`고객: 미션 참여 '${m.title}'(화면 조작)`, () => post("/api/missions/join", { mission_id: m.id }), null); };
+    row.append(b); box.append(row);
+  });
+  return k;
+}
+
+function rewardsCard(c) {
+  const L = c.ledger, p = c.persona;
+  const k = el("div", "card indent rewards");
+  const eq = c.skins.find((s) => s.id === L.equipped);
+  const missions = c.missions.map((m) => `<div class="kv"><span>${esc(m.title)}</span><span class="tag ${m.status === "달성" ? "t-g" : m.status === "미달성" ? "t-r" : "t-y"}">${esc(m.status)}</span></div>`).join("");
+  k.innerHTML = `<h4>꿀머니 · 꾸미기 <span class="tag t-g">시스템 원장</span></h4>
+    <div class="honey-hero">${p ? `<div class="char-wrap ${L.equipped ? "sk-" + L.equipped : ""}"><img src="${p.img}" alt=""></div>` : ""}
+      <div><small>꿀머니 잔액</small><b>${won(L.balance)}</b><span>받은 꿀머니 ${won(L.issued)} · 꾸미기에 쓴 꿀머니 ${won(L.spent_on_skins)}</span>
+      ${eq ? `<span class="tag t-b">착용 중 · ${esc(eq.name)}</span>` : ""}</div></div>
+    ${missions}<div class="sec">꾸미기 상점</div><div class="skins"></div>
+    <div class="muted">지급·판정은 시스템 · 구매는 화면에서만 · 1인 누적 한도 ${won(L.cap)} · 꾸미기에 쓴 꿀머니는 현금으로 나가지 않음</div>`;
+  const box = k.querySelector(".skins");
+  c.skins.forEach((s) => {
+    const b = el("button", s.owned ? "skin owned" : "skin", `<i class="sw sk-${s.id}"></i><span>${esc(s.name)}</span><small>${s.owned ? "보유" : won(s.price) + "꿀"}</small>`);
+    b.onclick = () => run(`고객: 스킨 '${s.name}'(화면 조작)`, () => post("/api/skins/buy", { skin_id: s.id }), null);
+    box.append(b);
+  });
+  return k;
+}
+
+function choosePersona(id, name) {
+  document.querySelectorAll(".match button").forEach((b) => { b.disabled = true; });
+  run(`고객: 담당 캐릭터 '${name}' 선택(화면 조작)`, () => post("/api/persona", { type_id: id }), null);
+}
+
+function applyPersona(p) {
+  persona = p;
+  const h = $("#persona-head");
+  $("#view-chat").classList.toggle("persona", !!p);
+  if (!p) { h.classList.add("hidden"); $("#input").placeholder = "위비에게 요청하기"; return; }
+  h.querySelector("img").src = p.img; h.querySelector("b").textContent = p.name; h.querySelector("small").textContent = `${p.type} 담당`;
+  h.classList.remove("hidden"); $("#input").placeholder = `${p.name}에게 요청하기`;
 }
 
 // ---------------------------------------------------------------- 응답 그리기
@@ -157,8 +291,11 @@ function renderReply(r) {
     msgs().append(p);
   }
   const trailing = [];
-  for (const c of r.cards) {
-    if (c.type === "quote") msgs().append(quoteCard(c));
+  let focus = null;  // 견적 카드는 아래(근거 블록)가 아니라 맨 위(큰 숫자)가 먼저 보이게
+  const cards = [...r.cards.filter((c) => c.type !== "items"), ...r.cards.filter((c) => c.type === "items").slice(-1)];  // 탐지 항목 카드는 맨 뒤에 한 번
+  for (const c of cards) {
+    if (c.type === "quote") { const q = quoteCard(c); msgs().append(q); focus = q; }
+    else if (c.type === "items") msgs().append(itemsCard(c));
     else if (c.type === "plan") { msgs().append(planCard(c)); const b = el("button", "cta", "이 계획 승인하기"); b.onclick = () => send("이 계획으로 진행할게요"); trailing.push(b); }
     else if (c.type === "plan_diff") msgs().append(diffCard(c));
     else if (c.type === "choices") { const w = el("div", "choices"); c.options.forEach((o) => { const b = el("button", null, esc(o)); b.onclick = () => send(o + "."); w.append(b); }); trailing.push(w); }
@@ -167,10 +304,17 @@ function renderReply(r) {
     else if (c.type === "failure") { const f = failureCard(c); msgs().append(f.card); trailing.push(...f.trailing); }
     else if (c.type === "followup") msgs().append(followupCard(c));
     else if (c.type === "status") msgs().append(statusCard(c));
+    else if (c.type === "consent") msgs().append(consentCard());
+    else if (c.type === "match") { const m = matchCard(c); msgs().append(m); focus = m; }
+    else if (c.type === "goal") trailing.push(goalCard(c));
+    else if (c.type === "reco") { const q = recoCard(c); msgs().append(q); focus = q; }
+    else if (c.type === "rewards") { const q = rewardsCard(c); msgs().append(q); focus = q; }
+    else if (c.type === "next") { const b = el("button", "cta", esc(c.label)); b.onclick = () => { b.disabled = true; advance(c.preset); }; trailing.push(b); }
   }
   r.after.forEach(botBubble);
   trailing.forEach((t) => msgs().append(t));
-  scrollDown();
+  if (focus) requestAnimationFrame(() => msgs().scrollTo({ top: Math.max(0, focus.offsetTop - 12), behavior: "smooth" }));
+  else scrollDown();
 }
 
 // 지난 승인 화면은 무효 표시(서버도 해시가 다르면 거부함)
@@ -208,9 +352,11 @@ function renderState(s) {
   $("#st-plan").textContent = s.plan_version ? `v${s.plan_version} · ${s.approval}` : "계획 전";
   $("#st-unauth").textContent = `${s.executed_without_approval}건`;
   $("#st-sub").textContent = `차단 ${s.blocked}건 · 중복 실행 방지 ${s.dup_prevented}건 · 숫자 검증 실패 ${s.totals.guard_fail}건 · 기준일 ${s.today}`;
+  $("#st-trust").textContent = `감사 로그 ${s.audit.count}건 · 체인 검증 ${s.audit.ok ? "✓" : "✗"} · ${s.boundary.auth_mock ? "모의 인증" : "본인 인증"} · ${s.boundary.adapter_simulated ? "모의 기관" : "기관 연동"}(${s.boundary.adapter}) · 세션 ${s.session}`;
   $("#mode").textContent = s.mode === "scripted" ? "대본 모드(API 키 없음)" : `LLM 모드 · ${s.model}`;
   $("#llm-pill").textContent = s.mode === "scripted" ? "대본 모드 · 같은 도구·검증" : `${s.model} · temperature 0`;
   markStaleApprovals();
+  applyPersona(s.persona);
 }
 
 // ---------------------------------------------------------------- 동작
@@ -243,8 +389,14 @@ async function approve(hash) {
   run("고객: 인증하고 승인", () => post("/api/approve", { plan_hash: hash }), null);
 }
 
+function decide(itemId, decision, label) {
+  const word = { confirm: "확정", include: "포함", exclude: "제외" }[decision];
+  run(`고객: ${label} ${word}(화면 조작)`, () => post("/api/items/decide", { item_id: itemId, decision }), null);
+}
+
 async function advance(preset) {
-  run(preset === "2w" ? "시간 진행: 2주 뒤" : "시간 진행: 이사 30일째", () => post("/api/advance", { preset }), null);
+  const label = { "2w": "시간 진행: 2주 뒤", "30d": "시간 진행: 이사 30일째", "1w": "시간 진행: 미션 1주 뒤" }[preset];
+  run(label, () => post("/api/advance", { preset }), null);
 }
 
 async function reset() {
@@ -255,8 +407,9 @@ async function reset() {
 }
 
 document.addEventListener("click", (e) => {
-  const t = e.target.closest("[data-say],[data-go],[data-act]");
+  const t = e.target.closest("[data-say],[data-go],[data-act],[data-decide]");
   if (!t) return;
+  if (t.dataset.decide) { e.preventDefault(); const [id, d] = t.dataset.decide.split(":"); decide(id, d, t.dataset.label); return; }
   if (t.dataset.say) send(t.dataset.say);
   if (t.dataset.go) show(t.dataset.go);
   if (t.dataset.act === "reset") reset();
@@ -268,6 +421,7 @@ document.addEventListener("keydown", (e) => {
   if (e.key === "r" || e.key === "R") reset();
   if (e.key === "2") advance("2w");
   if (e.key === "3") advance("30d");
+  if (e.key === "4") advance("1w");
 });
 
 const REC = new URLSearchParams(location.search).has("rec");

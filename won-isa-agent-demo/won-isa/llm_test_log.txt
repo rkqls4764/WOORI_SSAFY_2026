@@ -1,0 +1,59 @@
+==== WON-ISA LLM test 2026-11-11 18:52:39.80 ==== 
+name, memory.total [MiB]
+NVIDIA GeForce RTX 4060 Ti, 8188 MiB
+[1] NVIDIA GPU found - using qwen3:8b 
+[1] MODEL=qwen3:8b 
+[2] Ollama OK: C:\Users\home\AppData\Local\Programs\Ollama\ollama.exe 
+{"version":"0.40.15"} 
+[4] Downloading qwen3:8b (several GB, may take a while)... 
+[4] Model OK 
+[5] Skipping broken Python: C:\Users\home\anaconda3\python.exe 
+[5] Python: C:\Python312\python.exe 
+Python 3.12.1
+venv ok 3.12.1
+[5] Installing packages... 
+
+[notice] A new release of pip is available: 23.2.1 -> 26.3
+[notice] To update, run: C:\Users\home\AppData\Local\won-isa\venv\Scripts\python.exe -m pip install --upgrade pip
+[6] Wrote .env for qwen3:8b 
+[7] Smoke test... 
+mode: openai | model: qwen3:8b
+tools: ['get_transactions(months=6)', 'detect_recurring()', 'calc_switch_quote()']
+cards: ['items', 'quote'] | guard_ok: False | tokens: {'prompt': 10165, 'completion': 866} | sec: 30.4
+reply: 결과를 카드로 정리했어요. 숫자는 카드의 시스템 계산 값을 확인해 주세요.
+SMOKE_OK
+[7] ollama ps - how much of the model is on the GPU: 
+NAME        ID              SIZE      PROCESSOR    CONTEXT    RUNNER      UNTIL              
+qwen3:8b    500a1f067a9f    6.3 GB    100% GPU     16384      llamacpp    4 minutes from now    
+[8] Running evaluation... 
+[8] Evaluation finished. See eval_log.txt and eval\results_openai.json 
+[9] Recording LLM-mode video... 
+서버 시작: http://127.0.0.1:6321 (로그 C:\Users\home\Desktop\won-isa\logs\server_20261111_191619.log)
+  [19:16:29] ① 타행 반복거래 발견
+  [19:17:01] ② 견적
+  [19:17:11] ③ 고객 제약을 반영한 이사 순서
+  [19:17:55] ④ 승인 화면 준비
+  [19:18:22] ⑤ 모호하면 되묻기
+  [19:19:09] ⑥ 재계획 → 이전 승인 화면 자동 무효
+  [19:19:46] ⑦ 승인 없이 실행 요청 → 차단
+  [19:20:08] ⑧ 재승인 → 인증 → 공식 절차 신청(모의)
+  [19:20:55] ⑨ 2주 뒤 · 상태 추적과 실패 감지
+  [19:21:19] ⑩ 대안 선택
+  경고: 누를 버튼이 화면에 없음(LLM이 예상과 다른 응답을 함) → 이 동작은 건너뜀
+  [19:21:45] ⑪ 이사 30일째 · 정착 현황
+프레임 1195장 → 인코딩 (첫 프레임 +0.00초, 마지막 -5.97초)
+  장면 00 title: 6.0초
+  장면 01 home: 32.0초
+  장면 02 quote: 10.4초
+  장면 03 plan: 44.4초
+  장면 04 approval_v1: 26.3초
+  장면 05 ask: 47.8초
+  장면 06 replan: 36.8초
+  장면 07 blocked: 21.9초
+  장면 08 approve_v2: 47.1초
+  장면 09 fail: 23.7초
+  장면 10 followup: 26.2초
+  장면 11 settle: 24.9초
+  장면 12 end: 6.0초
+완료: C:\Users\home\Desktop\won-isa\won_isa_demo_llm.mp4
+==== ALL DONE 2026-11-11 19:22:52.57 ==== 

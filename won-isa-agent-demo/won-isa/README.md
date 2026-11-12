@@ -6,6 +6,10 @@ Figma 화면(김우리 K1~K7)을 그대로 쓰고, 대화·카드·실행 로그
 - **오른쪽 패널**: Agent가 실제로 부른 도구, 시스템 관찰·검증·차단·승인이 순서대로 쌓임
 - **원칙**: 숫자는 시스템이 계산하고, LLM은 도구 선택과 설명만 합니다. 실행은 고객이 승인 화면에서 인증하면 **시스템이** 승인 토큰(현재 계획 해시에 묶임)으로 합니다. LLM은 실행 경로에 없습니다.
 - **모호성 가드**: 고객이 '회비'처럼 여러 항목에 걸리는 말을 했는데 LLM이 하나를 골라 계획을 바꾸려 하면, `plan_schedule`이 거부하고 후보 버튼을 띄웁니다.
+- **근거 표시**: 견적·일정 카드마다 `데이터 출처 / 적용 규칙 / 가정 / 고객 확인 필요`가 붙습니다(값은 도구 결과의 `basis`, 규칙 목록은 `server/rules.py`의 `RULES`).
+- **항목별 고객 확정**: '탐지 항목 확인' 카드에서 고객이 항목을 확정·포함·제외합니다. 계획이 바뀌면 새 버전이 되고 기존 승인은 무효입니다. 승인 화면에는 '확인 필요' 항목이 따로 나열되고, 승인하면 함께 확정됩니다.
+- **데모와 운영의 경계**: 인증(`server/auth.py`)과 기관 연동(`server/adapters.py`)은 인터페이스 뒤에 있고, 데모는 모의 인증·시뮬레이터를 꽂아 씁니다. 그림은 http://localhost:8000/boundary.html
+- **감사 로그**: 계획 버전·해시, 승인, 차단, 실행 요청, 결과 수신, 후속 조치가 해시 체인 이벤트 로그로 남습니다(`logs/audit.jsonl`, 화면은 http://localhost:8000/audit.html). '승인 없는 실행 0건'은 이 로그만 읽어서 셉니다.
 
 ## 실행
 
@@ -31,10 +35,10 @@ LLM 모드는 OpenAI 호환 Chat Completions + tools 형식이면 어느 서비�
 
 ### Ollama(로컬 모델)로 LLM 모드 쓰기
 
-**Windows는 `windows_llm_test.bat`을 더블클릭하면 아래 과정과 확인·녹화·평가까지 한 번에 합니다.**
+**Windows는 `windows_llm_test.bat`을 더블클릭하면 아래 과정과 확인·평가·녹화까지 한 번에 합니다(발표 수치가 나오는 평가를 먼저 돌림).**
 GPU(NVIDIA)가 있으면 qwen3:8b, 없으면 qwen3:4b를 받습니다(`windows_llm_test.bat qwen3:14b`처럼 모델 지정 가능).
-결과: `llm_test_log.txt`(진행 기록), `won_isa_demo_llm.mp4`(LLM 모드 영상), `eval_log.txt`·`eval/results_openai.json`(평가).
-기존 Python은 건드리지 않고 프로젝트 안 `.venv`에 패키지를 설치합니다. 실행 중 뜨는 'ollama serve', 'won-isa server' 창은 끝날 때까지 닫지 마세요.
+결과: `llm_test_log.txt`(진행 기록), `eval_log.txt`·`eval/results_openai.json`·`eval/REPORT_openai.md`(평가), `won_isa_demo_llm.mp4`(LLM 모드 영상, 이전 영상은 `_prev`로 보관).
+기존 Python은 건드리지 않고 별도 가상환경에 패키지를 설치합니다. 실행 중 뜨는 'ollama serve' 창은 끝날 때까지 닫지 마세요. Ollama·데모 서버 출력은 창이 아니라 `logs/` 폴더의 파일로 남습니다(Windows 콘솔 창 안을 클릭하면 그 창에 출력하는 프로그램이 멈추는 문제를 피하려고). 녹화만 다시 하려면 `windows_llm_record.bat`.
 
 1. [ollama.com](https://ollama.com)에서 설치하고, tool calling을 지원하는 모델을 받습니다. 한국어는 Qwen 계열이 무난합니다.
    ```bash
@@ -47,7 +51,7 @@ GPU(NVIDIA)가 있으면 qwen3:8b, 없으면 qwen3:4b를 받습니다(`windows_l
    (이 환경변수가 없는 버전이면 Modelfile에 `PARAMETER num_ctx 16384`를 넣어 새 모델을 만드세요.)
 3. `.env.example`을 `.env`로 복사합니다. 맨 위 A) Ollama 블록이 기본값입니다.
 4. `run.bat` / `run.sh` → 오른쪽 위 표시가 'LLM 모드'로 바뀌면 성공입니다.
-5. `python -m eval.run_eval`로 18개 시나리오를 돌려 모델이 도구를 제대로 고르는지 먼저 확인합니다.
+5. `python -m eval.run_eval`로 21개 시나리오를 돌려 모델이 도구를 제대로 고르는지 먼저 확인합니다.
 
 참고
 - 8B 모델은 GPU(VRAM 8GB 이상)나 Apple Silicon(메모리 16GB 이상)에서 한 번 호출에 수 초입니다. CPU만 있으면 한 턴(LLM 호출 2~4번)에 수십 초가 걸릴 수 있습니다.
@@ -79,9 +83,10 @@ GPU(NVIDIA)가 있으면 qwen3:8b, 없으면 qwen3:4b를 받습니다(`windows_l
 pip install playwright && playwright install chromium   # 처음 한 번
 python -m record.record_demo --out won_isa_demo.mp4      # 약 2분(--pace 1.0이면 약 1분 25초)
 python -m record.record_demo --check                     # 영상 대신 주요 순간 스크린샷만
+python -m record.record_demo --serve --out demo.mp4      # 서버를 직접 띄우고 끝나면 끔(로그는 logs/server_*.log)
 ```
 
-`.env`에 LLM 키를 넣고 서버를 켜면 같은 스크립트가 LLM 모드로 녹화합니다. LLM 응답 시간만큼 영상이 길어지니 편집에서 대기 구간을 줄이세요. 화면에서 녹화용 화면만 보려면 주소 뒤에 `?rec=1`을 붙입니다.
+`.env`에 LLM 키를 넣고 서버를 켜면 같은 스크립트가 LLM 모드로 녹화합니다. 장면마다 진행 시각이 출력되고, 중간에 실패하면 그때까지 찍은 부분을 `_partial.mp4`로 남깁니다. LLM 호출은 `LLM_TIMEOUT`(기본 120초) 안에 끝나지 않으면 그 요청만 실패로 기록(감사 로그 `LLM_ERROR`)하고 다음으로 넘어갑니다. LLM 응답 시간만큼 영상이 길어지니 편집에서 대기 구간을 줄이세요. 화면에서 녹화용 화면만 보려면 주소 뒤에 `?rec=1`을 붙입니다.
 
 ## 평가 수치(발표 '만들어서 재봤습니다' 슬라이드용)
 
@@ -89,7 +94,25 @@ python -m record.record_demo --check                     # 영상 대신 주요 
 python -m eval.run_eval
 ```
 
-21개 시나리오로 도구 선택, 되묻기, 승인 없는 실행 0건, 승인 후 신청, 재승인 요구, 숫자 검증, 옛 승인 거부, 중복 실행 방지, 토큰·응답 시간을 잽니다. 결과는 `eval/results_<모드>.json`에 저장됩니다.
+21개 시나리오로 도구 선택, 되묻기, 승인 없는 실행 0건, 승인 후 신청, 재승인 요구, 숫자 검증, 토큰·응답 시간을 잽니다.
+LLM과 무관한 시스템 통제 9개(옛 승인 화면 거부, 중복 실행 방지, 감사 로그 체인 검증·변조 탐지, 위조 토큰·다른 세션 토큰 차단, 세션 분리, 항목 제외 후 재승인)도 함께 확인합니다.
+
+| 출력 | 내용 |
+| --- | --- |
+| `eval/results_<모드>.json` | 재현 정보(모델명, 실행 일시, temperature·시드, 데이터 시드, 코드 지문, 환경), 성공률, 실패 사례(입력·호출한 도구·답변), 시나리오별 결과 |
+| `eval/REPORT_<모드>.md` | 같은 내용을 슬라이드에 옮기기 좋게 정리한 표 |
+| `eval/llm_runs/<일시>_<모델>.json` | LLM 모드 실행 이력(덮어쓰지 않고 쌓임) |
+| http://localhost:8000/eval.html | 저장된 결과를 그대로 보여 주는 화면 |
+
+LLM 모드는 temperature 0과 고정 시드(`LLM_SEED`, 기본 7)로 돌립니다. 모델 서버에 따라 완전히 같은 출력이 보장되지는 않으니, 발표 수치에는 실행 일시와 모델명을 함께 적으세요.
+
+### 반복 거래 탐지 정확도
+
+```bash
+python -m eval.detect_eval            # 가상 고객 100명, 시드 2026 → eval/detect_results.json
+```
+
+탐지는 LLM이 아니라 `server/detector.py`의 규칙입니다(같은 상대·같은 채널 3회 이상, 간격 중앙값 25~35일, 마지막 거래 45일 이내). 정답이 붙은 가상 고객에게 같은 함수를 돌려 유형별 정탐·오탐·미탐을 셉니다. 현재 결과는 정밀도 97.3%, 재현율 96.4%이고, 오탐 18건은 모두 불규칙한 지인 송금이 '확인 필요'로 잡힌 것(자동 탐지 항목 중 오탐 0건), 미탐 24건은 시작한 지 2회뿐인 신규 납부입니다. 격월·분기 납부는 규칙 범위 밖이라 잡지 않습니다. 가상 데이터 기준이며 실제 거래 데이터의 정확도가 아닙니다.
 
 **대본 모드 결과는 정책·통제 점검용입니다. 발표 수치는 반드시 LLM 모드로 다시 돌린 값을 쓰세요.** LLM 모드에서는 일부 시나리오가 실패할 수 있고, 그 실패와 원인을 그대로 보여주는 편이 신뢰를 줍니다.
 
@@ -97,21 +120,28 @@ python -m eval.run_eval
 
 ```
 server/
-  app.py      API: /api/chat, /api/approve(모의 인증), /api/advance(시간 진행), /api/reset
+  app.py      API: /api/chat, /api/approve, /api/items/decide(항목 확정·포함·제외), /api/advance(시간 진행), /api/audit, /api/eval, /api/reset · 쿠키별 세션
   agent.py    Agent 루프(최대 8스텝), LLM 백엔드 2종, 로그·카드 생성
-  tools.py    도구 10개, 계획 버전·해시, 승인 게이트, 멱등키, 이전 항목 상태 머신, 모의 공식 결과
-  rules.py    영업일·공휴일, 이전 시점 규칙
+  tools.py    도구 10개, 계획 버전·해시, 승인 게이트(토큰 검증), 멱등키, 이전 항목 상태 머신, 카드별 근거
+  detector.py 반복 거래 탐지 규칙과 임계값
+  auth.py     인증 어댑터: MockAuthenticator(데모) / BankAuthenticator(운영 자리, 미구현)
+  adapters.py 기관 연동 어댑터: DemoSimulator(데모 시나리오) / AccountMoveServiceAdapter(운영 자리, 미구현)
+  audit.py    감사 이벤트 로그(추가 전용, 해시 체인, JSONL)
+  rules.py    영업일·공휴일, 이전 시점 규칙과 규칙 목록(RULES: 근거·규칙·가정)
   guard.py    답변 속 숫자 ⊆ 도구 결과 검증
   prompts.py  시스템 프롬프트
   data.py     가상 고객 김우리의 6개월 거래 412건, 상품 조건
-web/          index.html · app.js · styles.css · assets(Figma에서 뽑은 이미지)
-eval/         run_eval.py
+web/          index.html · app.js · styles.css · assets(Figma에서 뽑은 이미지) · audit.html · boundary.html · eval.html
+eval/         run_eval.py(시나리오·시스템 통제) · detect_eval.py(탐지 정확도) · report.py(마크다운 리포트)
 record/       record_demo.py(영상 자동 녹화)
 ```
 
 ## 발표에서 밝힐 것
 
 - 고객·거래·기관은 모두 가상이며, 실행은 모의(공식 절차 연동 없음)입니다.
+- 인증은 모의입니다. 승인 토큰을 세션·계획 해시에 묶고 실행 직전에 검증하는 구조는 있지만, 본인 확인 자체는 하지 않습니다.
+- 세션은 브라우저 쿠키별로 서버 메모리에 둡니다(로그인 없음, 재시작하면 사라짐). 다중 서버·동시성은 다루지 않습니다.
+- 감사 로그는 변조하면 검증이 깨지는 해시 체인이지, 변경이 불가능한 저장소는 아닙니다. 운영에서는 변경 불가 저장소가 필요합니다.
 - 자동송금 D-2영업일 제한은 하나은행 계좌이동서비스 FAQ 기준이고 자동송금에만 적용합니다. 자동납부 처리 기간 3영업일은 **가정**입니다.
 - 우대금리 조건(기본 0.1%, 200만 원 이하 최고 3.1%)은 팀 PPT 부록 11의 출처(우리은행 금리표 2026.11.09) 기준입니다.
 - 원문 적요는 LLM에 넘기지 않습니다(악성 문구가 든 1원 송금이 데이터에 들어 있음).
@@ -124,7 +154,7 @@ record/       record_demo.py(영상 자동 녹화)
 
 ## 고칠 때
 
-- 데이터·시나리오 날짜: `server/data.py`, 모의 결과: `tools.py`의 `EVENTS`
-- 규칙: `server/rules.py`
+- 데이터·시나리오 날짜: `server/data.py`, 모의 결과: `server/adapters.py`의 `DEMO_SCENARIO`
+- 규칙: `server/rules.py`, 탐지 임계값: `server/detector.py`
 - Agent 말투·장면 안내: `server/prompts.py`
 - Figma 화면을 바꾸면 360×800 크기로 다시 내보내 `web/assets/`에 같은 이름으로 넣습니다. 홈 화면의 누르는 영역 좌표는 `web/index.html`에 있습니다.

@@ -1,0 +1,16 @@
+==== WON-ISA LLM eval 2026-11-12  0:35:47.97 ==== 
+name, memory.used [MiB], memory.total [MiB]
+NVIDIA GeForce RTX 4060 Ti, 1363 MiB, 8188 MiB
+Smoke test... 
+mode: openai | model: qwen3:8b
+tools: ['get_transactions(months=6)', 'detect_recurring()', 'calc_switch_quote()']
+cards: ['items', 'quote'] | guard_ok: True | tokens: {'prompt': 10640, 'completion': 805} | sec: 25.0
+reply: 우리WON뱅킹 '우월한 월급 통장'으로 이전 시 연 3.0% 금리 차이로 약 6만 원(세전) 추가 이자가 예상됩니다. 다만, A은행 기존 혜택 상실 및 해지 손실 등 미확인 요소가 있어 총순혜택은 '확인 중'입니다. 이사 계획을 세울까요?
+SMOKE_OK
+NAME        ID              SIZE      PROCESSOR    CONTEXT    RUNNER      UNTIL              
+qwen3:8b    500a1f067a9f    6.3 GB    100% GPU     16384      llamacpp    4 minutes from now    
+GPU OK 
+Evaluation... 
+NAME        ID              SIZE      PROCESSOR    CONTEXT    RUNNER      UNTIL              
+qwen3:8b    500a1f067a9f    6.3 GB    100% GPU     16384      llamacpp    4 minutes from now    
+==== DONE 2026-11-12  1:19:07.54 ==== 

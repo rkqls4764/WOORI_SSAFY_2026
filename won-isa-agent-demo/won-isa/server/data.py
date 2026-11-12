@@ -114,8 +114,26 @@ def build_transactions(seed: int = 7) -> list[Tx]:
             txs.append(Tx(d.isoformat(), -rng.randrange(10_000, 200_000, 1_000), "즉시이체", rng.choice(["박지훈", "최유진", "정민서", "엄마"])))
         else:
             txs.append(Tx(d.isoformat(), -rng.choice([50_000, 100_000]), "ATM", "ATM 출금"))
+    _shape_spending(txs, random.Random(seed + 1000))
     txs.sort(key=lambda t: t.date)
     return txs
 
 
+def _shape_spending(txs: list[Tx], rng: random.Random) -> None:
+    """김우리의 카드 소비를 외식·배달 비중이 큰 패턴으로 만든다(슬라이드 8: 외식·미식형 → 달보).
+    날짜·금액·건수는 그대로 두고 일부 체크카드 가맹점 이름만 바꾼다 → 반복거래 탐지·견적에는 영향 없음."""
+    for t in txs:
+        if t.channel == "체크카드" and t.counterparty not in ("배달의민족", "맘스터치", "스타벅스") and rng.random() < 0.35:
+            t.counterparty = rng.choice(["배달의민족", "배달의민족", "쿠팡이츠", "김밥천국", "동네 한식당"])
+
+
 TRANSACTIONS = build_transactions()
+
+
+def mission_week_txs(start: date) -> list[Tx]:
+    """정착 후 미션 1주의 모의 거래내역(데모): 배달 2회, 그 밖의 외식·카페 3회, 자유적금 납입 1회."""
+    d = lambda k: (start + timedelta(days=k)).isoformat()
+    return [Tx(d(1), -23_000, "체크카드", "배달의민족"), Tx(d(2), -8_500, "체크카드", "김밥천국"),
+            Tx(d(3), -6_200, "체크카드", "스타벅스"), Tx(d(4), -26_000, "체크카드", "쿠팡이츠"),
+            Tx(d(5), -11_000, "체크카드", "동네 한식당"),
+            Tx(d(6), -50_000, "적금이체", "우리 SUPER주거래 자유적금")]

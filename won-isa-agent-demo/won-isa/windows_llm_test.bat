@@ -21,12 +21,28 @@ if not "%~1"=="" set "MODEL=%~1"
 echo [1] MODEL=%MODEL% >> "%LOG%"
 echo [1] MODEL=%MODEL%
 
-rem ---- 2) Ollama install (winget, per-user)
+rem ---- 2) Ollama install (per-user): existing install -> winget -> official installer from ollama.com
 set "OLLAMA=%LOCALAPPDATA%\Programs\Ollama\ollama.exe"
+if not exist "%OLLAMA%" if exist "%ProgramFiles%\Ollama\ollama.exe" set "OLLAMA=%ProgramFiles%\Ollama\ollama.exe"
+if not exist "%OLLAMA%" for /f "delims=" %%i in ('where ollama 2^>nul') do if not defined OLLAMA_FOUND set "OLLAMA_FOUND=1" & set "OLLAMA=%%i"
 if not exist "%OLLAMA%" (
-  echo [2] Installing Ollama with winget... >> "%LOG%"
-  echo [2] Installing Ollama with winget...
-  winget install --id Ollama.Ollama -e --silent --accept-source-agreements --accept-package-agreements >> "%LOG%" 2>&1
+  where winget >nul 2>&1
+  if not errorlevel 1 (
+    echo [2] Installing Ollama with winget... >> "%LOG%"
+    echo [2] Installing Ollama with winget...
+    winget install --id Ollama.Ollama -e --silent --accept-source-agreements --accept-package-agreements >> "%LOG%" 2>&1
+  )
+)
+if not exist "%OLLAMA%" (
+  echo [2] winget not available - downloading the official installer from ollama.com >> "%LOG%"
+  echo [2] Downloading Ollama installer from ollama.com, about 1GB...
+  curl -L --fail -s -S -o "%TEMP%\OllamaSetup.exe" https://ollama.com/download/OllamaSetup.exe >> "%LOG%" 2>&1
+  if exist "%TEMP%\OllamaSetup.exe" (
+    echo [2] Installing Ollama for this user, silent... >> "%LOG%"
+    echo [2] Installing Ollama for this user...
+    start "" /wait "%TEMP%\OllamaSetup.exe" /VERYSILENT /NORESTART /SUPPRESSMSGBOXES
+    set "OLLAMA=%LOCALAPPDATA%\Programs\Ollama\ollama.exe"
+  )
 )
 if not exist "%OLLAMA%" (
   echo [2] FAIL: Ollama not found. Install it from https://ollama.com/download and run this file again. >> "%LOG%"
@@ -41,7 +57,9 @@ set "OLLAMA_CONTEXT_LENGTH=16384"
 rem smaller KV cache so a 8B model + 16k context fits in 8GB VRAM (faster)
 set "OLLAMA_FLASH_ATTENTION=1"
 set "OLLAMA_KV_CACHE_TYPE=q8_0"
-start "ollama serve - keep this window open" /min "%OLLAMA%" serve
+if not exist "%~dp0logs" mkdir "%~dp0logs"
+rem Ollama output goes to a file, not to the window: clicking inside a console window freezes any program writing to it
+start "ollama serve - keep this window open" /min cmd /c ""%OLLAMA%" serve > "%~dp0logs\ollama_serve_log.txt" 2>&1"
 timeout /t 6 /nobreak >nul
 curl -s http://localhost:11434/api/version >> "%LOG%" 2>&1
 echo. >> "%LOG%"
@@ -113,6 +131,7 @@ if exist ".env" (
 
 rem ---- 7) Smoke test: one LLM turn
 set "PYTHONUTF8=1"
+set "PYTHONUNBUFFERED=1"
 echo [7] Smoke test... >> "%LOG%"
 echo [7] Smoke test (first call loads the model, can take a minute)...
 "%VPY%" scripts\smoke_test.py >> "%LOG%" 2>&1
@@ -123,40 +142,30 @@ if errorlevel 1 (
 echo [7] ollama ps - how much of the model is on the GPU: >> "%LOG%"
 "%OLLAMA%" ps >> "%LOG%" 2>&1
 
-rem ---- 8) LLM-mode video
-echo [8] Recording LLM-mode video... >> "%LOG%"
-echo [8] Recording LLM-mode video...
-"%VPY%" -m playwright install chromium >> "%LOG%" 2>&1
-rem a new port, so an old demo server left open on 8000 is never recorded by mistake
-set "PORT=8765"
-curl -s -o nul http://localhost:%PORT%/api/state && (
-  echo [8] FAIL: port %PORT% is already in use. Close the old "won-isa server" window and run again. >> "%LOG%"
-  goto :fail
-)
-start "won-isa server - keep this window open" /min "%VPY%" -m uvicorn server.app:app --port %PORT%
-set /a N=0
-:waitsrv
-set /a N+=1
-curl -s -o nul http://localhost:%PORT%/api/state && goto :srvok
-if %N% GEQ 40 (
-  echo [8] FAIL: server did not start >> "%LOG%"
-  goto :fail
-)
-timeout /t 1 /nobreak >nul
-goto :waitsrv
-:srvok
-"%VPY%" -m record.record_demo --url http://localhost:%PORT% --out "%~dp0won_isa_demo_llm.mp4" >> "%LOG%" 2>&1
-if errorlevel 1 echo [8] WARN: recording failed, continuing to evaluation >> "%LOG%"
-
-rem ---- 9) Evaluation (18 scenarios; slowest step)
-echo [9] Running evaluation (this is the slowest step)... >> "%LOG%"
-echo [9] Running evaluation (this is the slowest step)...
+rem ---- 8) Evaluation first: it gives the numbers for the slides (21 scenarios + system controls; slowest step)
+echo [8] Running evaluation... >> "%LOG%"
+echo [8] Running evaluation - slowest step, about 20-40 minutes. Progress is written to eval_log.txt
 "%VPY%" -m eval.run_eval > "%~dp0eval_log.txt" 2>&1
-echo [9] Evaluation finished. See eval_log.txt and eval\results_openai.json >> "%LOG%"
+if errorlevel 1 (
+  echo [8] WARN: evaluation exited with an error. See eval_log.txt >> "%LOG%"
+) else (
+  echo [8] Evaluation finished. See eval_log.txt and eval\results_openai.json >> "%LOG%"
+)
+
+rem ---- 9) LLM-mode video. The recorder starts its own server: no extra window, output in logs\server_*.log, stopped at the end
+echo [9] Recording LLM-mode video... >> "%LOG%"
+echo [9] Recording LLM-mode video, about 5 minutes...
+"%VPY%" -m playwright install chromium >> "%LOG%" 2>&1
+if exist "%~dp0won_isa_demo_llm.mp4" (
+  if exist "%~dp0won_isa_demo_llm_prev.mp4" ren "%~dp0won_isa_demo_llm_prev.mp4" "won_isa_demo_llm_prev_%RANDOM%.mp4"
+  ren "%~dp0won_isa_demo_llm.mp4" "won_isa_demo_llm_prev.mp4"
+)
+"%VPY%" -m record.record_demo --serve --out "%~dp0won_isa_demo_llm.mp4" >> "%LOG%" 2>&1
+if errorlevel 1 echo [9] WARN: recording stopped early. Partial video if any: won_isa_demo_llm_partial.mp4 >> "%LOG%"
 
 echo ==== ALL DONE %date% %time% ==== >> "%LOG%"
 echo.
-echo ALL DONE. Results: llm_test_log.txt, eval_log.txt, won_isa_demo_llm.mp4
+echo ALL DONE. Results: llm_test_log.txt, eval_log.txt, eval\REPORT_openai.md, won_isa_demo_llm.mp4
 pause
 exit /b 0
 
